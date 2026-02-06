@@ -1,22 +1,3 @@
-"""
-main.py — FastAPI para o Dashboard Open Series 2025 (Wild Rift).
-
-Modelo: series → games (suporta Bo1/Bo3/Bo5).
-
-Uso:
-    pip install fastapi uvicorn psycopg2-binary python-dotenv
-    uvicorn main:app --reload --port 8000
-
-Variáveis de ambiente (.env):
-    SUPABASE_DB_HOST=db.xxxxxxxxxxxx.supabase.co
-    SUPABASE_DB_PORT=5432
-    SUPABASE_DB_NAME=postgres
-    SUPABASE_DB_USER=postgres
-    SUPABASE_DB_PASSWORD=sua_senha_aqui
-    CORS_ORIGINS=http://localhost:3000,https://seu-site.com
-    ADMIN_API_KEY=chave-secreta-aqui
-"""
-
 import os
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -57,7 +38,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Open Series 2025 — Wild Rift Dashboard API",
+    title="Open Series - Wild Rift",
     version="2.0.0",
     lifespan=lifespan,
 )

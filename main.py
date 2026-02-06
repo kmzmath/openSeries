@@ -33,12 +33,14 @@ load_dotenv()
 # ─── Config ─────────────────────────────────────────────────
 
 DB_CONFIG = {
-    "host":     os.getenv("SUPABASE_DB_HOST", "localhost"),
-    "port":     int(os.getenv("SUPABASE_DB_PORT", 5432)),
-    "dbname":   os.getenv("SUPABASE_DB_NAME", "postgres"),
-    "user":     os.getenv("SUPABASE_DB_USER", "postgres"),
+    "host": os.getenv("SUPABASE_DB_HOST", "localhost"),
+    "port": int(os.getenv("SUPABASE_DB_PORT", 5432)),
+    "dbname": os.getenv("SUPABASE_DB_NAME", "postgres"),
+    "user": os.getenv("SUPABASE_DB_USER", "postgres"),
     "password": os.getenv("SUPABASE_DB_PASSWORD", ""),
+    "sslmode": os.getenv("SUPABASE_DB_SSLMODE", "require"),
 }
+
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "change-me")
 

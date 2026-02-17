@@ -193,16 +193,35 @@ def list_players(
     if sort_by not in PLAYER_SORT:
         sort_by = "games_played"
     return query(f"""
-        SELECT * FROM mv_player_stats
-        ORDER BY {sort_by} {order.upper()} NULLS LAST
+        SELECT
+        mps.*,
+        p.team_id,
+        t.name AS team_name,
+        t.icon_url AS team_icon_url
+        FROM mv_player_stats mps
+        JOIN players p ON p.id = mps.player_id
+        LEFT JOIN teams t ON t.id = p.team_id
+        ORDER BY mps.{sort_by} {order.upper()} NULLS LAST
         LIMIT %s OFFSET %s
     """, (limit, offset))
+
+
 
 
 @app.get("/api/players/{player_id}", tags=["Jogadores"])
 def get_player(player_id: int):
     """Detalhes de um jogador + campeões jogados."""
-    row = query_one("SELECT * FROM mv_player_stats WHERE player_id = %s", (player_id,))
+    row = query_one("""
+        SELECT
+        mps.*,
+        p.team_id,
+        t.name AS team_name,
+        t.icon_url AS team_icon_url
+        FROM mv_player_stats mps
+        JOIN players p ON p.id = mps.player_id
+        LEFT JOIN teams t ON t.id = p.team_id
+        WHERE mps.player_id = %s
+    """, (player_id,))
     if not row:
         raise HTTPException(404, "Jogador não encontrado")
 
@@ -231,16 +250,15 @@ def get_player(player_id: int):
 
 @app.get("/api/teams", tags=["Times"])
 def list_teams(
-    group_: Optional[str] = Query(None, alias="group", description="Filtrar por grupo (ex.: A)"),
+    group_: Optional[str] = Query(None, alias="group"),
     status: Optional[str] = Query(
         None,
-        pattern="^(DESISTENTE|PENDENTE|APROVADA|DESCLASSIFICADA|REPROVADA)$",
-        description="Filtrar por status",
+        pattern="^(DESISTENTE|PENDENTE|APROVADA|DESCLASSIFICADA)$",
     ),
+    include_lineup: bool = Query(False),
     sort_by: str = Query("games_played"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
 ):
-    """Lista times com estatísticas (com filtros)."""
     if sort_by not in TEAM_SORT:
         sort_by = "games_played"
 
@@ -248,23 +266,41 @@ def list_teams(
     params = []
 
     if group_:
-        conditions.append("bracket_group = %s")
+        conditions.append("mts.bracket_group = %s")
         params.append(group_)
 
     if status:
-        conditions.append("status = %s")
+        conditions.append("mts.status = %s")
         params.append(status)
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-    return query(
-        f"""
-        SELECT * FROM mv_team_stats
-        {where}
-        ORDER BY {sort_by} {order.upper()} NULLS LAST
-        """,
-        tuple(params),
-    )
+    if include_lineup:
+        sql = f"""
+            SELECT
+              mts.*,
+              COALESCE(l.lineup, '[]'::json) AS lineup
+            FROM mv_team_stats mts
+            LEFT JOIN LATERAL (
+              SELECT json_agg(
+                       json_build_object('player_id', p.id, 'nickname', p.nickname)
+                       ORDER BY p.nickname
+                     ) AS lineup
+              FROM players p
+              WHERE p.team_id = mts.team_id
+            ) l ON TRUE
+            {where}
+            ORDER BY mts.{sort_by} {order.upper()} NULLS LAST
+        """
+    else:
+        sql = f"""
+            SELECT mts.*
+            FROM mv_team_stats mts
+            {where}
+            ORDER BY mts.{sort_by} {order.upper()} NULLS LAST
+        """
+
+    return query(sql, tuple(params))
 
 @app.get("/api/teams/{team_id}", tags=["Times"])
 def get_team(team_id: int):
@@ -314,6 +350,8 @@ def get_team(team_id: int):
         WHERE p.team_id = %s
         ORDER BY games_for_team DESC, p.nickname
     """, (team_id, team_id, team_id))
+    row["lineup"] = roster
+    return row
 
 
 

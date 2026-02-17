@@ -107,7 +107,9 @@ PLAYER_SORT = {
 TEAM_SORT = {
     "team_name", "games_played", "wins", "losses", "win_rate",
     "avg_kills", "avg_deaths", "avg_assists", "avg_gold",
+    "bracket_group", "status",
 }
+
 
 
 # ═══════════════════════════════════════════════════════════
@@ -229,17 +231,40 @@ def get_player(player_id: int):
 
 @app.get("/api/teams", tags=["Times"])
 def list_teams(
+    group_: Optional[str] = Query(None, alias="group", description="Filtrar por grupo (ex.: A)"),
+    status: Optional[str] = Query(
+        None,
+        pattern="^(DESISTENTE|PENDENTE|APROVADA|DESCLASSIFICADA|REPROVADA)$",
+        description="Filtrar por status",
+    ),
     sort_by: str = Query("games_played"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
 ):
-    """Lista times com estatísticas."""
+    """Lista times com estatísticas (com filtros)."""
     if sort_by not in TEAM_SORT:
         sort_by = "games_played"
-    return query(f"""
-        SELECT * FROM mv_team_stats
-        ORDER BY {sort_by} {order.upper()} NULLS LAST
-    """)
 
+    conditions = []
+    params = []
+
+    if group_:
+        conditions.append("bracket_group = %s")
+        params.append(group_)
+
+    if status:
+        conditions.append("status = %s")
+        params.append(status)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    return query(
+        f"""
+        SELECT * FROM mv_team_stats
+        {where}
+        ORDER BY {sort_by} {order.upper()} NULLS LAST
+        """,
+        tuple(params),
+    )
 
 @app.get("/api/teams/{team_id}", tags=["Times"])
 def get_team(team_id: int):

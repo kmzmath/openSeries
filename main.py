@@ -274,26 +274,47 @@ def get_team(team_id: int):
         raise HTTPException(404, "Time não encontrado")
 
     roster = query("""
+        WITH agg AS (
+            SELECT
+                gp.player_id,
+                COUNT(*) AS games_for_team,
+                SUM(CASE WHEN gp.victory THEN 1 ELSE 0 END) AS wins,
+                SUM(gp.kills) AS kills,
+                SUM(gp.deaths) AS deaths,
+                SUM(gp.assists) AS assists,
+                ROUND((SUM(gp.kills) + SUM(gp.assists))::NUMERIC
+                    / NULLIF(SUM(gp.deaths), 0), 2) AS kda
+            FROM game_players gp
+            WHERE gp.team_id = %s
+            GROUP BY gp.player_id
+        ),
+        role_counts AS (
+            SELECT
+                gp.player_id,
+                gp.role,
+                COUNT(*) AS role_games,
+                ROW_NUMBER() OVER (PARTITION BY gp.player_id ORDER BY COUNT(*) DESC) AS rn
+            FROM game_players gp
+            WHERE gp.team_id = %s
+            GROUP BY gp.player_id, gp.role
+        )
         SELECT
             p.id AS player_id,
             p.nickname,
-            gp.role,
-            COUNT(*) AS games_for_team,
-            SUM(CASE WHEN gp.victory THEN 1 ELSE 0 END) AS wins,
-            SUM(gp.kills) AS kills,
-            SUM(gp.deaths) AS deaths,
-            SUM(gp.assists) AS assists,
-            ROUND((SUM(gp.kills) + SUM(gp.assists))::NUMERIC
-                  / NULLIF(SUM(gp.deaths), 0), 2) AS kda
-        FROM game_players gp
-        JOIN players p ON p.id = gp.player_id
-        WHERE gp.team_id = %s
-        GROUP BY p.id, p.nickname, gp.role
-        ORDER BY games_for_team DESC
-    """, (team_id,))
+            rc.role AS main_role,
+            COALESCE(a.games_for_team, 0) AS games_for_team,
+            COALESCE(a.wins, 0) AS wins,
+            COALESCE(a.kills, 0) AS kills,
+            COALESCE(a.deaths, 0) AS deaths,
+            COALESCE(a.assists, 0) AS assists,
+            COALESCE(a.kda, 0) AS kda
+        FROM players p
+        LEFT JOIN agg a ON a.player_id = p.id
+        LEFT JOIN role_counts rc ON rc.player_id = p.id AND rc.rn = 1
+        WHERE p.team_id = %s
+        ORDER BY games_for_team DESC, p.nickname
+    """, (team_id, team_id, team_id))
 
-    row["roster"] = roster
-    return row
 
 
 # ─── 5. CONFRONTOS (SÉRIES) ────────────────────────────────

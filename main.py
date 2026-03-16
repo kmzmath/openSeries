@@ -1,6 +1,7 @@
 import os
 from contextlib import asynccontextmanager
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -253,7 +254,7 @@ def list_teams(
     group_: Optional[str] = Query(None, alias="group"),
     status: Optional[str] = Query(
         None,
-        pattern="^(DESISTENTE|PENDENTE|APROVADA|DESCLASSIFICADA)$",
+        pattern="^(DESISTENTE|PENDENTE|APROVADA|DESCLASSIFICADA|REPROVADA)$",
     ),
     include_lineup: bool = Query(False),
     sort_by: str = Query("games_played"),
@@ -279,8 +280,11 @@ def list_teams(
         sql = f"""
             SELECT
               mts.*,
+              gs.starts_at AS group_start_at,
               COALESCE(l.lineup, '[]'::json) AS lineup
             FROM mv_team_stats mts
+            LEFT JOIN public.group_schedules gs
+              ON gs.bracket_group = mts.bracket_group
             LEFT JOIN LATERAL (
               SELECT json_agg(
                        json_build_object('player_id', p.id, 'nickname', p.nickname)
@@ -294,20 +298,62 @@ def list_teams(
         """
     else:
         sql = f"""
-            SELECT mts.*
+            SELECT
+              mts.*,
+              gs.starts_at AS group_start_at
             FROM mv_team_stats mts
+            LEFT JOIN public.group_schedules gs
+              ON gs.bracket_group = mts.bracket_group
             {where}
             ORDER BY mts.{sort_by} {order.upper()} NULLS LAST
         """
 
-    return query(sql, tuple(params))
+    teams = query(sql, tuple(params))
+    for team in teams:
+        raw_start = team.get("group_start_at")
+        team["group_start_label"] = fmt_datetime_br(raw_start)
+        team["group_start_at"] = raw_start.isoformat() if raw_start else None
+
+    group_sql = """
+        SELECT
+            gs.bracket_group AS group_code,
+            gs.starts_at
+        FROM public.group_schedules gs
+        {where}
+        ORDER BY gs.starts_at ASC, gs.bracket_group ASC
+    """
+    group_where = "WHERE gs.bracket_group = %s" if group_ else ""
+    groups = query(group_sql.format(where=group_where), ((group_,) if group_ else ()))
+
+    for group in groups:
+        raw_start = group.get("starts_at")
+        group["group_name"] = f"Grupo {group['group_code']}"
+        group["start_label"] = fmt_datetime_br(raw_start)
+        group["starts_at"] = raw_start.isoformat() if raw_start else None
+
+    return {
+        "groups": groups,
+        "teams": teams,
+    }
 
 @app.get("/api/teams/{team_id}", tags=["Times"])
 def get_team(team_id: int):
     """Detalhes de um time + roster."""
-    row = query_one("SELECT * FROM mv_team_stats WHERE team_id = %s", (team_id,))
+    row = query_one("""
+        SELECT
+            mts.*,
+            gs.starts_at AS group_start_at
+        FROM mv_team_stats mts
+        LEFT JOIN public.group_schedules gs
+          ON gs.bracket_group = mts.bracket_group
+        WHERE mts.team_id = %s
+    """, (team_id,))
     if not row:
         raise HTTPException(404, "Time não encontrado")
+
+    raw_start = row.get("group_start_at")
+    row["group_start_label"] = fmt_datetime_br(raw_start)
+    row["group_start_at"] = raw_start.isoformat() if raw_start else None
 
     roster = query("""
         WITH agg AS (

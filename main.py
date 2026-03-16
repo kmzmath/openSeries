@@ -89,6 +89,18 @@ def fmt_duration(seconds: int | None) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def fmt_datetime_br(value) -> str | None:
+    """Formata datetime como DD/MM HH:MM no fuso de São Paulo."""
+    if value is None:
+        return None
+    dt = value
+    if getattr(dt, "tzinfo", None) is None:
+        dt = dt.replace(tzinfo=ZoneInfo("America/Sao_Paulo"))
+    else:
+        dt = dt.astimezone(ZoneInfo("America/Sao_Paulo"))
+    return dt.strftime("%d/%m %H:%M")
+
+
 def verify_admin(x_api_key: str = Header(None)):
     if x_api_key != ADMIN_API_KEY:
         raise HTTPException(403, "API key inválida")

@@ -107,14 +107,18 @@ def verify_admin(x_api_key: str = Header(None)):
 
 
 def build_group_agenda(teams: list[dict], bracket_group: str) -> dict:
-    ordered_teams = sorted(
-        teams,
-        key=lambda t: (
-            t["seed"],
-            t["tie_breaker"],
-            t["team_name"].lower(),
-        ),
-    )
+    def agenda_sort_key(team: dict):
+        seed = team.get("seed")
+        tie_breaker = team.get("tie_breaker")
+        return (
+            seed is None,
+            seed if seed is not None else 0,
+            tie_breaker is None,
+            tie_breaker if tie_breaker is not None else 0,
+            team["team_name"].lower(),
+        )
+
+    ordered_teams = sorted(teams, key=agenda_sort_key)
 
     if len(ordered_teams) != 4:
         raise HTTPException(
@@ -482,7 +486,7 @@ def get_agenda(
             t.tie_breaker
         FROM public.teams t
         WHERE t.bracket_group = %s
-        ORDER BY t.seed ASC, t.tie_breaker ASC, t.name ASC
+        ORDER BY t.seed ASC NULLS LAST, t.tie_breaker ASC NULLS LAST, t.name ASC
     """, (bracket_group,))
 
     if not teams:

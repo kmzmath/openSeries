@@ -106,6 +106,58 @@ def verify_admin(x_api_key: str = Header(None)):
         raise HTTPException(403, "API key inválida")
 
 
+def build_group_agenda(teams: list[dict], bracket_group: str) -> dict:
+    ordered_teams = sorted(
+        teams,
+        key=lambda t: (
+            t["seed"],
+            t["tie_breaker"],
+            t["team_name"].lower(),
+        ),
+    )
+
+    if len(ordered_teams) != 4:
+        raise HTTPException(
+            400,
+            f"O grupo {bracket_group} precisa ter exatamente 4 times para gerar a agenda.",
+        )
+
+    t1, t2, t3, t4 = ordered_teams
+    pairings = [
+        (t1, t4),
+        (t2, t3),
+        (t1, t3),
+        (t2, t4),
+        (t1, t2),
+        (t3, t4),
+        (t4, t1),
+        (t3, t2),
+        (t3, t1),
+        (t4, t2),
+        (t2, t1),
+        (t4, t3),
+    ]
+
+    matches = []
+    for idx, (home, away) in enumerate(pairings, start=1):
+        matches.append({
+            "order": idx,
+            "home_team_id": home["team_id"],
+            "home_team": home["team_name"],
+            "home_seed": home["seed"],
+            "away_team_id": away["team_id"],
+            "away_team": away["team_name"],
+            "away_seed": away["seed"],
+            "label": f'{home["team_name"]} x {away["team_name"]}',
+        })
+
+    return {
+        "bracket_group": bracket_group,
+        "teams": ordered_teams,
+        "matches": matches,
+    }
+
+
 # ─── Whitelist de colunas para ORDER BY (previne SQL injection) ──
 
 CHAMPION_SORT = {
@@ -120,7 +172,7 @@ PLAYER_SORT = {
 TEAM_SORT = {
     "team_name", "games_played", "wins", "losses", "win_rate",
     "avg_kills", "avg_deaths", "avg_assists", "avg_gold",
-    "bracket_group", "status",
+    "bracket_group", "status", "seed", "tie_breaker",
 }
 
 
@@ -411,6 +463,32 @@ def get_team(team_id: int):
     row["lineup"] = roster
     return row
 
+
+
+@app.get("/api/agenda", tags=["Times"])
+def get_agenda(
+    bracket_group: str = Query(..., min_length=1, max_length=10),
+):
+    """Retorna a agenda fixa do grupo baseada na seed dos times."""
+    bracket_group = bracket_group.strip().upper()
+
+    teams = query("""
+        SELECT
+            t.id AS team_id,
+            t.name AS team_name,
+            t.icon_url,
+            t.bracket_group,
+            t.seed,
+            t.tie_breaker
+        FROM public.teams t
+        WHERE t.bracket_group = %s
+        ORDER BY t.seed ASC, t.tie_breaker ASC, t.name ASC
+    """, (bracket_group,))
+
+    if not teams:
+        raise HTTPException(404, f"Nenhum time encontrado para o grupo {bracket_group}")
+
+    return build_group_agenda(teams, bracket_group)
 
 
 # ─── 5. CONFRONTOS (SÉRIES) ────────────────────────────────

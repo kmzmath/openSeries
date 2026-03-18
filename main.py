@@ -106,7 +106,11 @@ def verify_admin(x_api_key: str = Header(None)):
         raise HTTPException(403, "API key inválida")
 
 
-def build_group_agenda(teams: list[dict], bracket_group: str) -> dict:
+def build_group_agenda(
+    teams: list[dict],
+    bracket_group: str,
+    starts_at=None,
+) -> dict:
     def agenda_sort_key(team: dict):
         seed = team.get("seed")
         tie_breaker = team.get("tie_breaker")
@@ -125,6 +129,10 @@ def build_group_agenda(teams: list[dict], bracket_group: str) -> dict:
             400,
             f"O grupo {bracket_group} precisa ter exatamente 4 times para gerar a agenda.",
         )
+
+    group_start_at = starts_at
+    group_start_label = fmt_datetime_br(group_start_at)
+    group_name = f"Grupo {bracket_group}"
 
     t1, t2, t3, t4 = ordered_teams
     pairings = [
@@ -157,6 +165,9 @@ def build_group_agenda(teams: list[dict], bracket_group: str) -> dict:
 
     return {
         "bracket_group": bracket_group,
+        "group_name": group_name,
+        "group_start_at": group_start_at.isoformat() if group_start_at else None,
+        "group_start_label": group_start_label,
         "teams": ordered_teams,
         "matches": matches,
     }
@@ -473,7 +484,7 @@ def get_team(team_id: int):
 def get_agenda(
     bracket_group: str = Query(..., min_length=1, max_length=10),
 ):
-    """Retorna a agenda fixa do grupo baseada na seed dos times."""
+    """Retorna a agenda fixa do grupo baseada na seed dos times e início do grupo."""
     bracket_group = bracket_group.strip().upper()
 
     teams = query("""
@@ -483,8 +494,11 @@ def get_agenda(
             t.icon_url,
             t.bracket_group,
             t.seed,
-            t.tie_breaker
+            t.tie_breaker,
+            gs.starts_at AS group_start_at
         FROM public.teams t
+        LEFT JOIN public.group_schedules gs
+          ON gs.bracket_group = t.bracket_group
         WHERE t.bracket_group = %s
         ORDER BY t.seed ASC NULLS LAST, t.tie_breaker ASC NULLS LAST, t.name ASC
     """, (bracket_group,))
@@ -492,7 +506,11 @@ def get_agenda(
     if not teams:
         raise HTTPException(404, f"Nenhum time encontrado para o grupo {bracket_group}")
 
-    return build_group_agenda(teams, bracket_group)
+    group_start_at = teams[0].get("group_start_at")
+    for team in teams:
+        team.pop("group_start_at", None)
+
+    return build_group_agenda(teams, bracket_group, starts_at=group_start_at)
 
 
 # ─── 5. CONFRONTOS (SÉRIES) ────────────────────────────────

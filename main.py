@@ -173,6 +173,221 @@ def build_group_agenda(
     }
 
 
+
+def group_series_by_best_of(series_list: list[dict]) -> dict:
+    grouped = {"MD1": [], "MD3": [], "MD5": []}
+    for item in series_list:
+        key = f"MD{item['best_of']}"
+        grouped.setdefault(key, []).append(item)
+    return grouped
+
+
+
+def fetch_series_payload(
+    where_sql: str = "",
+    params: tuple = (),
+    limit: int | None = None,
+    offset: int | None = None,
+) -> list[dict]:
+    sql_params = list(params)
+    pagination_sql = ""
+
+    if limit is not None:
+        pagination_sql += "\n        LIMIT %s"
+        sql_params.append(limit)
+        if offset is not None:
+            pagination_sql += "\n        OFFSET %s"
+            sql_params.append(offset)
+    elif offset is not None:
+        pagination_sql += "\n        OFFSET %s"
+        sql_params.append(offset)
+
+    series_rows = query(f"""
+        SELECT
+            s.id,
+            s.match_date,
+            s.match_number,
+            s.stage,
+            s.day,
+            s.best_of,
+            s.team_a_id,
+            s.team_b_id,
+            ta.name AS team_a,
+            ta.icon_url AS team_a_icon,
+            tb.name AS team_b,
+            tb.icon_url AS team_b_icon
+        FROM series s
+        JOIN teams ta ON ta.id = s.team_a_id
+        JOIN teams tb ON tb.id = s.team_b_id
+        {where_sql}
+        ORDER BY s.match_date DESC, s.match_number DESC{pagination_sql}
+    """, tuple(sql_params))
+
+    if not series_rows:
+        return []
+
+    series_ids = [s["id"] for s in series_rows]
+
+    series_map: dict[int, dict] = {}
+    for s in series_rows:
+        sid = s["id"]
+        series_map[sid] = {
+            "series_id": sid,
+            "match_id": sid,
+            "match_number": s["match_number"],
+            "date": str(s["match_date"]),
+            "stage": s["stage"],
+            "day": s["day"],
+            "best_of": s["best_of"],
+            "best_of_label": f"MD{s['best_of']}",
+            "home_team_id": s["team_a_id"],
+            "home_team": s["team_a"],
+            "home_team_icon": s["team_a_icon"],
+            "away_team_id": s["team_b_id"],
+            "away_team": s["team_b"],
+            "away_team_icon": s["team_b_icon"],
+            "home_score": 0,
+            "away_score": 0,
+            # aliases de compatibilidade
+            "team_a": s["team_a"],
+            "team_a_icon": s["team_a_icon"],
+            "team_b": s["team_b"],
+            "team_b_icon": s["team_b_icon"],
+            "team_a_wins": 0,
+            "team_b_wins": 0,
+            "total_games": 0,
+            "games": [],
+        }
+
+    games_rows = query("""
+        SELECT
+            g.id AS game_id,
+            g.series_id,
+            g.game_number,
+            g.duration_sec,
+            g.winner_side,
+            g.blue_team_id,
+            bt.name AS blue_team,
+            g.red_team_id,
+            rt.name AS red_team
+        FROM games g
+        JOIN teams bt ON bt.id = g.blue_team_id
+        JOIN teams rt ON rt.id = g.red_team_id
+        WHERE g.series_id = ANY(%s)
+        ORDER BY g.series_id, g.game_number
+    """, (series_ids,))
+
+    if not games_rows:
+        return [series_map[s["id"]] for s in series_rows]
+
+    game_ids = [g["game_id"] for g in games_rows]
+
+    players_rows = query("""
+        SELECT
+            gp.game_id,
+            gp.side,
+            gp.role,
+            p.nickname,
+            c.name AS champion,
+            gp.kills,
+            gp.deaths,
+            gp.assists,
+            gp.gold,
+            gp.level
+        FROM game_players gp
+        JOIN players p ON p.id = gp.player_id
+        JOIN champions c ON c.id = gp.champion_id
+        WHERE gp.game_id = ANY(%s)
+        ORDER BY
+            gp.game_id,
+            CASE gp.side WHEN 'AZUL' THEN 0 ELSE 1 END,
+            ARRAY_POSITION(ARRAY['TOP','JG','MID','ADC','SUP'], gp.role)
+    """, (game_ids,))
+
+    bans_rows = query("""
+        SELECT
+            gb.game_id,
+            gb.team_id,
+            c.name AS champion
+        FROM game_bans gb
+        JOIN champions c ON c.id = gb.champion_id
+        WHERE gb.game_id = ANY(%s)
+        ORDER BY gb.game_id, gb.id
+    """, (game_ids,))
+
+    game_map: dict[int, dict] = {}
+
+    for g in games_rows:
+        series_obj = series_map.get(g["series_id"])
+        if not series_obj:
+            continue
+
+        game_obj = {
+            "game_id": g["game_id"],
+            "game_number": g["game_number"],
+            "winner_side": g["winner_side"],
+            "duration": fmt_duration(g["duration_sec"]),
+            "duration_sec": g["duration_sec"],
+            "blue": {
+                "team_id": g["blue_team_id"],
+                "team": g["blue_team"],
+                "bans": [],
+                "players": [],
+            },
+            "red": {
+                "team_id": g["red_team_id"],
+                "team": g["red_team"],
+                "bans": [],
+                "players": [],
+            },
+        }
+
+        series_obj["games"].append(game_obj)
+        series_obj["total_games"] += 1
+
+        winner_team_id = g["blue_team_id"] if g["winner_side"] == "AZUL" else g["red_team_id"]
+        if winner_team_id == series_obj["home_team_id"]:
+            series_obj["home_score"] += 1
+            series_obj["team_a_wins"] += 1
+        elif winner_team_id == series_obj["away_team_id"]:
+            series_obj["away_score"] += 1
+            series_obj["team_b_wins"] += 1
+
+        game_map[g["game_id"]] = game_obj
+
+    for b in bans_rows:
+        game_obj = game_map.get(b["game_id"])
+        if not game_obj:
+            continue
+        if b["team_id"] == game_obj["blue"]["team_id"]:
+            game_obj["blue"]["bans"].append(b["champion"])
+        elif b["team_id"] == game_obj["red"]["team_id"]:
+            game_obj["red"]["bans"].append(b["champion"])
+
+    for pr in players_rows:
+        game_obj = game_map.get(pr["game_id"])
+        if not game_obj:
+            continue
+
+        payload = {
+            "nickname": pr["nickname"],
+            "role": pr["role"],
+            "champion": pr["champion"],
+            "kills": pr["kills"],
+            "deaths": pr["deaths"],
+            "assists": pr["assists"],
+            "gold": pr["gold"],
+            "level": pr["level"],
+        }
+
+        if pr["side"] == "AZUL":
+            game_obj["blue"]["players"].append(payload)
+        else:
+            game_obj["red"]["players"].append(payload)
+
+    return [series_map[s["id"]] for s in series_rows]
+
+
 # ─── Whitelist de colunas para ORDER BY (previne SQL injection) ──
 
 CHAMPION_SORT = {
@@ -484,7 +699,7 @@ def get_team(team_id: int):
 def get_agenda(
     bracket_group: str = Query(..., min_length=1, max_length=10),
 ):
-    """Retorna a agenda fixa do grupo baseada na seed dos times e início do grupo."""
+    """Retorna a agenda fixa do grupo e, quando existir série cadastrada, também o placar."""
     bracket_group = bracket_group.strip().upper()
 
     teams = query("""
@@ -510,7 +725,98 @@ def get_agenda(
     for team in teams:
         team.pop("group_start_at", None)
 
-    return build_group_agenda(teams, bracket_group, starts_at=group_start_at)
+    agenda = build_group_agenda(teams, bracket_group, starts_at=group_start_at)
+
+    series_rows = query("""
+        SELECT
+            s.id AS series_id,
+            s.match_date,
+            s.match_number,
+            s.stage,
+            s.day,
+            s.best_of,
+            s.team_a_id,
+            s.team_b_id,
+            COALESCE(SUM(
+                CASE
+                    WHEN g.winner_side = 'AZUL' AND g.blue_team_id = s.team_a_id THEN 1
+                    WHEN g.winner_side = 'VERMELHO' AND g.red_team_id = s.team_a_id THEN 1
+                    ELSE 0
+                END
+            ), 0) AS team_a_score,
+            COALESCE(SUM(
+                CASE
+                    WHEN g.winner_side = 'AZUL' AND g.blue_team_id = s.team_b_id THEN 1
+                    WHEN g.winner_side = 'VERMELHO' AND g.red_team_id = s.team_b_id THEN 1
+                    ELSE 0
+                END
+            ), 0) AS team_b_score
+        FROM series s
+        JOIN teams ta ON ta.id = s.team_a_id
+        JOIN teams tb ON tb.id = s.team_b_id
+        LEFT JOIN games g ON g.series_id = s.id
+        WHERE ta.bracket_group = %s
+          AND tb.bracket_group = %s
+        GROUP BY
+            s.id,
+            s.match_date,
+            s.match_number,
+            s.stage,
+            s.day,
+            s.best_of,
+            s.team_a_id,
+            s.team_b_id
+        ORDER BY s.match_date, s.match_number
+    """, (bracket_group, bracket_group))
+
+    series_lookup: dict[tuple[int, int], dict] = {}
+    for row in series_rows:
+        forward = {
+            "series_id": row["series_id"],
+            "match_id": row["series_id"],
+            "match_number": row["match_number"],
+            "date": str(row["match_date"]),
+            "stage": row["stage"],
+            "day": row["day"],
+            "best_of": row["best_of"],
+            "best_of_label": f"MD{row['best_of']}",
+            "home_score": row["team_a_score"],
+            "away_score": row["team_b_score"],
+        }
+        reverse = {
+            "series_id": row["series_id"],
+            "match_id": row["series_id"],
+            "match_number": row["match_number"],
+            "date": str(row["match_date"]),
+            "stage": row["stage"],
+            "day": row["day"],
+            "best_of": row["best_of"],
+            "best_of_label": f"MD{row['best_of']}",
+            "home_score": row["team_b_score"],
+            "away_score": row["team_a_score"],
+        }
+        series_lookup[(row["team_a_id"], row["team_b_id"])] = forward
+        series_lookup[(row["team_b_id"], row["team_a_id"])] = reverse
+
+    for match in agenda["matches"]:
+        series_data = series_lookup.get((match["home_team_id"], match["away_team_id"]))
+        if series_data:
+            match.update(series_data)
+        else:
+            match.update({
+                "series_id": None,
+                "match_id": None,
+                "match_number": None,
+                "date": None,
+                "stage": None,
+                "day": None,
+                "best_of": None,
+                "best_of_label": None,
+                "home_score": None,
+                "away_score": None,
+            })
+
+    return agenda
 
 
 # ─── 5. CONFRONTOS (SÉRIES) ────────────────────────────────
@@ -519,14 +825,14 @@ def get_agenda(
 def list_series(
     stage: Optional[str] = Query(None, description="Filtrar por etapa"),
     team: Optional[str] = Query(None, description="Filtrar por nome do time"),
+    best_of: Optional[int] = Query(None, ge=1, le=5, description="Filtrar MD1/MD3/MD5"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     """
-    Lista séries com dados completos:
-    - team_a/team_b + icons
-    - placar (team_a_wins/team_b_wins) + total_games
-    - games[] com blue/red (bans + players)
+    Endpoint unificado de confrontos.
+    Retorna todas as séries com metadados da partida, placar agregado,
+    jogos, bans e estatísticas individuais dos jogadores.
     """
     conditions = []
     params = []
@@ -537,87 +843,17 @@ def list_series(
     if team:
         conditions.append("(ta.name ILIKE %s OR tb.name ILIKE %s)")
         params.extend([f"%{team}%", f"%{team}%"])
+    if best_of is not None:
+        conditions.append("s.best_of = %s")
+        params.append(best_of)
 
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    ordered = fetch_series_payload(where_sql=where_sql, params=tuple(params), limit=limit, offset=offset)
 
-    # 1) Séries + dados dos times A/B (nome + ícone + ids)
-    series_rows = query(f"""
-        SELECT
-            s.id,
-            s.match_date,
-            s.match_number,
-            s.stage,
-            s.day,
-            s.best_of,
-            s.team_a_id,
-            s.team_b_id,
-            ta.name AS team_a,
-            ta.icon_url AS team_a_icon,
-            tb.name AS team_b,
-            tb.icon_url AS team_b_icon
-        FROM series s
-        JOIN teams ta ON ta.id = s.team_a_id
-        JOIN teams tb ON tb.id = s.team_b_id
-        {where}
-        ORDER BY s.match_date DESC, s.match_number DESC
-        LIMIT %s OFFSET %s
-    """, (*params, limit, offset))
-
-    if not series_rows:
-        return []
-
-    series_ids = [s["id"] for s in series_rows]
-
-    # Mapa base da resposta por série
-    series_map: dict[int, dict] = {}
-    for s in series_rows:
-        sid = s["id"]
-        series_map[sid] = {
-            "id": sid,
-            "match_date": str(s["match_date"]),
-            "match_number": s["match_number"],
-            "stage": s["stage"],
-            "day": s["day"],
-            "best_of": s["best_of"],
-            "team_a": s["team_a"],
-            "team_a_icon": s["team_a_icon"],
-            "team_b": s["team_b"],
-            "team_b_icon": s["team_b_icon"],
-            "team_a_wins": 0,
-            "team_b_wins": 0,
-            "total_games": 0,
-            "games": [],
-            # internos p/ computar wins
-            "_team_a_id": s["team_a_id"],
-            "_team_b_id": s["team_b_id"],
-        }
-
-    # 2) Jogos de todas as séries retornadas
-    games_rows = query("""
-        SELECT
-            g.id AS game_id,
-            g.series_id,
-            g.game_number,
-            g.duration_sec,
-            g.winner_side,
-            g.blue_team_id,
-            bt.name AS blue_team,
-            g.red_team_id,
-            rt.name AS red_team
-        FROM games g
-        JOIN teams bt ON bt.id = g.blue_team_id
-        JOIN teams rt ON rt.id = g.red_team_id
-        WHERE g.series_id = ANY(%s)
-        ORDER BY g.series_id, g.game_number
-    """, (series_ids,))
-
-    # Se não houver jogos (séries vazias), devolve séries com games=[]
-    if not games_rows:
-        ordered = [series_map[s["id"]] for s in series_rows]
-        for s in ordered:
-            s.pop("_team_a_id", None)
-            s.pop("_team_b_id", None)
-        return ordered
+    return {
+        "series": ordered,
+        "by_best_of": group_series_by_best_of(ordered),
+    }
 
     game_ids = [g["game_id"] for g in games_rows]
 
@@ -737,75 +973,11 @@ def list_series(
 
 @app.get("/api/series/{series_id}", tags=["Confrontos"])
 def get_series(series_id: int):
-    """Detalhes completos de uma série: jogos, picks, bans e desempenho."""
-    s = query_one("""
-        SELECT
-            s.id, s.match_date, s.match_number, s.stage, s.day, s.best_of,
-            ta.name AS team_a, tb.name AS team_b
-        FROM series s
-        JOIN teams ta ON ta.id = s.team_a_id
-        JOIN teams tb ON tb.id = s.team_b_id
-        WHERE s.id = %s
-    """, (series_id,))
-
-    if not s:
+    """Detalhes completos de uma série usando o mesmo payload do endpoint unificado."""
+    ordered = fetch_series_payload(where_sql="WHERE s.id = %s", params=(series_id,))
+    if not ordered:
         raise HTTPException(404, "Série não encontrada")
-
-    # Jogos da série
-    games_list = query("""
-        SELECT
-            g.id, g.game_number, g.duration_sec, g.winner_side,
-            bt.name AS blue_team, rt.name AS red_team
-        FROM games g
-        JOIN teams bt ON bt.id = g.blue_team_id
-        JOIN teams rt ON rt.id = g.red_team_id
-        WHERE g.series_id = %s
-        ORDER BY g.game_number
-    """, (series_id,))
-
-    for game in games_list:
-        game_id = game["id"]
-        game["duration"] = fmt_duration(game.pop("duration_sec"))
-
-        # Jogadores do jogo
-        players = query("""
-            SELECT
-                gp.side, gp.role,
-                p.nickname,
-                c.name AS champion,
-                t.name AS team,
-                gp.gold, gp.level,
-                gp.kills, gp.deaths, gp.assists,
-                gp.victory
-            FROM game_players gp
-            JOIN players p ON p.id = gp.player_id
-            JOIN champions c ON c.id = gp.champion_id
-            JOIN teams t ON t.id = gp.team_id
-            WHERE gp.game_id = %s
-            ORDER BY
-                CASE gp.side WHEN 'AZUL' THEN 0 ELSE 1 END,
-                ARRAY_POSITION(ARRAY['TOP','JG','MID','ADC','SUP'], gp.role)
-        """, (game_id,))
-
-        # Bans do jogo
-        bans = query("""
-            SELECT t.name AS team, c.name AS champion
-            FROM game_bans gb
-            JOIN teams t ON t.id = gb.team_id
-            JOIN champions c ON c.id = gb.champion_id
-            WHERE gb.game_id = %s
-        """, (game_id,))
-
-        blue_players = [p for p in players if p["side"] == "AZUL"]
-        red_players = [p for p in players if p["side"] == "VERMELHO"]
-        blue_bans = [b["champion"] for b in bans if b["team"] == game["blue_team"]]
-        red_bans = [b["champion"] for b in bans if b["team"] == game["red_team"]]
-
-        game["blue"] = {"team": game["blue_team"], "players": blue_players, "bans": blue_bans}
-        game["red"] = {"team": game["red_team"], "players": red_players, "bans": red_bans}
-
-    s["games"] = games_list
-    return s
+    return ordered[0]
 
 
 # ─── 6. JOGOS INDIVIDUAIS ──────────────────────────────────

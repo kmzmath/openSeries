@@ -82,7 +82,7 @@ def query_one(sql: str, params: tuple = ()) -> dict | None:
 
 
 def fmt_duration(seconds: int | None) -> str:
-    """Formata segundos como MM:SS."""
+    """Formata segundos como MM:SS para exibição."""
     if seconds is None:
         return "00:00"
     m, s = divmod(int(seconds), 60)
@@ -420,7 +420,8 @@ def get_overview():
     Estatísticas gerais do campeonato.
     - total_games: jogos individuais (não séries)
     - total_series: séries (partidas no sentido do Excel)
-    - avg_duration: duração média em MM:SS
+    - avg_duration_sec: duração média em segundos (campo canônico)
+    - avg_duration_label: duração média formatada em MM:SS (compatibilidade/UI)
     """
     row = query_one("""
         SELECT
@@ -443,7 +444,9 @@ def get_overview():
             ) AS red_winrate
     """)
     if row:
-        row["avg_duration"] = fmt_duration(row.pop("avg_duration_sec"))
+        avg_sec = row.get("avg_duration_sec")
+        row["avg_duration_label"] = fmt_duration(avg_sec)
+        row["avg_duration"] = row["avg_duration_label"]
     return row
 
 
@@ -999,7 +1002,9 @@ def get_game(game_id: int):
     if not game:
         raise HTTPException(404, "Jogo não encontrado")
 
-    game["duration"] = fmt_duration(game.pop("duration_sec"))
+    game["duration_sec"] = int(game["duration_sec"]) if game.get("duration_sec") is not None else None
+    game["duration_label"] = fmt_duration(game["duration_sec"])
+    game["duration"] = game["duration_label"]
 
     players = query("""
         SELECT

@@ -786,20 +786,7 @@ def get_agenda(
             "home_score": row["team_a_score"],
             "away_score": row["team_b_score"],
         }
-        reverse = {
-            "series_id": row["series_id"],
-            "match_id": row["series_id"],
-            "match_number": row["match_number"],
-            "date": str(row["match_date"]),
-            "stage": row["stage"],
-            "day": row["day"],
-            "best_of": row["best_of"],
-            "best_of_label": f"MD{row['best_of']}",
-            "home_score": row["team_b_score"],
-            "away_score": row["team_a_score"],
-        }
         series_lookup[(row["team_a_id"], row["team_b_id"])] = forward
-        series_lookup[(row["team_b_id"], row["team_a_id"])] = reverse
 
     for match in agenda["matches"]:
         series_data = series_lookup.get((match["home_team_id"], match["away_team_id"]))

@@ -156,9 +156,11 @@ def build_group_agenda(
             "order": idx,
             "home_team_id": home["team_id"],
             "home_team": home["team_name"],
+            "home_team_tag": home.get("team_tag"),
             "home_seed": home["seed"],
             "away_team_id": away["team_id"],
             "away_team": away["team_name"],
+            "away_team_tag": away.get("team_tag"),
             "away_seed": away["seed"],
             "label": f'{home["team_name"]} x {away["team_name"]}',
         })
@@ -213,8 +215,10 @@ def fetch_series_payload(
             s.team_a_id,
             s.team_b_id,
             ta.name AS team_a,
+            ta.tag AS team_a_tag,
             ta.icon_url AS team_a_icon,
             tb.name AS team_b,
+            tb.tag AS team_b_tag,
             tb.icon_url AS team_b_icon
         FROM series s
         JOIN teams ta ON ta.id = s.team_a_id
@@ -242,16 +246,20 @@ def fetch_series_payload(
             "best_of_label": f"MD{s['best_of']}",
             "home_team_id": s["team_a_id"],
             "home_team": s["team_a"],
+            "home_team_tag": s["team_a_tag"],
             "home_team_icon": s["team_a_icon"],
             "away_team_id": s["team_b_id"],
             "away_team": s["team_b"],
+            "away_team_tag": s["team_b_tag"],
             "away_team_icon": s["team_b_icon"],
             "home_score": 0,
             "away_score": 0,
             # aliases de compatibilidade
             "team_a": s["team_a"],
+            "team_a_tag": s["team_a_tag"],
             "team_a_icon": s["team_a_icon"],
             "team_b": s["team_b"],
+            "team_b_tag": s["team_b_tag"],
             "team_b_icon": s["team_b_icon"],
             "team_a_wins": 0,
             "team_b_wins": 0,
@@ -268,8 +276,10 @@ def fetch_series_payload(
             g.winner_side,
             g.blue_team_id,
             bt.name AS blue_team,
+            bt.tag AS blue_team_tag,
             g.red_team_id,
-            rt.name AS red_team
+            rt.name AS red_team,
+            rt.tag AS red_team_tag
         FROM games g
         JOIN teams bt ON bt.id = g.blue_team_id
         JOIN teams rt ON rt.id = g.red_team_id
@@ -331,12 +341,14 @@ def fetch_series_payload(
             "blue": {
                 "team_id": g["blue_team_id"],
                 "team": g["blue_team"],
+                "tag": g["blue_team_tag"],
                 "bans": [],
                 "players": [],
             },
             "red": {
                 "team_id": g["red_team_id"],
                 "team": g["red_team"],
+                "tag": g["red_team_tag"],
                 "bans": [],
                 "players": [],
             },
@@ -577,9 +589,12 @@ def list_teams(
         sql = f"""
             SELECT
               mts.*,
+              t.tag AS team_tag,
               gs.starts_at AS group_start_at,
               COALESCE(l.lineup, '[]'::json) AS lineup
             FROM mv_team_stats mts
+            JOIN public.teams t
+              ON t.id = mts.team_id
             LEFT JOIN public.group_schedules gs
               ON gs.bracket_group = mts.bracket_group
             LEFT JOIN LATERAL (
@@ -597,8 +612,11 @@ def list_teams(
         sql = f"""
             SELECT
               mts.*,
+              t.tag AS team_tag,
               gs.starts_at AS group_start_at
             FROM mv_team_stats mts
+            JOIN public.teams t
+              ON t.id = mts.team_id
             LEFT JOIN public.group_schedules gs
               ON gs.bracket_group = mts.bracket_group
             {where}
@@ -639,8 +657,11 @@ def get_team(team_id: int):
     row = query_one("""
         SELECT
             mts.*,
+            t.tag AS team_tag,
             gs.starts_at AS group_start_at
         FROM mv_team_stats mts
+        JOIN public.teams t
+          ON t.id = mts.team_id
         LEFT JOIN public.group_schedules gs
           ON gs.bracket_group = mts.bracket_group
         WHERE mts.team_id = %s
@@ -709,6 +730,7 @@ def get_agenda(
         SELECT
             t.id AS team_id,
             t.name AS team_name,
+            t.tag AS team_tag,
             t.icon_url,
             t.bracket_group,
             t.seed,
@@ -979,7 +1001,10 @@ def get_game(game_id: int):
         SELECT
             g.id, g.game_number, g.duration_sec, g.winner_side,
             g.series_id,
-            bt.name AS blue_team, rt.name AS red_team
+            bt.name AS blue_team,
+            bt.tag AS blue_team_tag,
+            rt.name AS red_team,
+            rt.tag AS red_team_tag
         FROM games g
         JOIN teams bt ON bt.id = g.blue_team_id
         JOIN teams rt ON rt.id = g.red_team_id
@@ -1025,8 +1050,18 @@ def get_game(game_id: int):
     blue_bans = [b["champion"] for b in bans if b["team"] == game["blue_team"]]
     red_bans = [b["champion"] for b in bans if b["team"] == game["red_team"]]
 
-    game["blue"] = {"team": game["blue_team"], "players": blue_players, "bans": blue_bans}
-    game["red"] = {"team": game["red_team"], "players": red_players, "bans": red_bans}
+    game["blue"] = {
+        "team": game["blue_team"],
+        "tag": game["blue_team_tag"],
+        "players": blue_players,
+        "bans": blue_bans,
+    }
+    game["red"] = {
+        "team": game["red_team"],
+        "tag": game["red_team_tag"],
+        "players": red_players,
+        "bans": red_bans,
+    }
     return game
 
 

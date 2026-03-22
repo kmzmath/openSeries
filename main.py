@@ -468,17 +468,29 @@ def get_overview():
 def list_champions(
     sort_by: str = Query("picks"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
-    limit: int = Query(100, ge=1, le=200),
+    limit: Optional[int] = Query(None, ge=1),
     offset: int = Query(0, ge=0),
 ):
-    """Lista campeões com pick/ban/win/KDA/gold."""
+    """Lista campeões com pick/ban/win/KDA/gold.
+
+    Por padrão retorna todos os registros. Use `limit` apenas se quiser paginar.
+    """
     if sort_by not in CHAMPION_SORT:
         sort_by = "picks"
-    return query(f"""
+
+    sql = f"""
         SELECT * FROM mv_champion_stats
         ORDER BY {sort_by} {order.upper()} NULLS LAST
-        LIMIT %s OFFSET %s
-    """, (limit, offset))
+    """
+    params = []
+    if limit is not None:
+        sql += "\n        LIMIT %s"
+        params.append(limit)
+    if offset:
+        sql += "\n        OFFSET %s"
+        params.append(offset)
+
+    return query(sql, tuple(params))
 
 
 @app.get("/api/champions/{champion_id}", tags=["Campeões"])
@@ -496,13 +508,17 @@ def get_champion(champion_id: int):
 def list_players(
     sort_by: str = Query("games_played"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
-    limit: int = Query(100, ge=1, le=200),
+    limit: Optional[int] = Query(None, ge=1),
     offset: int = Query(0, ge=0),
 ):
-    """Lista jogadores com estatísticas."""
+    """Lista jogadores com estatísticas.
+
+    Por padrão retorna todos os registros. Use `limit` apenas se quiser paginar.
+    """
     if sort_by not in PLAYER_SORT:
         sort_by = "games_played"
-    return query(f"""
+
+    sql = f"""
         SELECT
         mps.*,
         p.team_id,
@@ -512,8 +528,16 @@ def list_players(
         JOIN players p ON p.id = mps.player_id
         LEFT JOIN teams t ON t.id = p.team_id
         ORDER BY mps.{sort_by} {order.upper()} NULLS LAST
-        LIMIT %s OFFSET %s
-    """, (limit, offset))
+    """
+    params = []
+    if limit is not None:
+        sql += "\n        LIMIT %s"
+        params.append(limit)
+    if offset:
+        sql += "\n        OFFSET %s"
+        params.append(offset)
+
+    return query(sql, tuple(params))
 
 
 
@@ -838,7 +862,7 @@ def list_series(
     stage: Optional[str] = Query(None, description="Filtrar por etapa"),
     team: Optional[str] = Query(None, description="Filtrar por nome do time"),
     best_of: Optional[int] = Query(None, ge=1, le=5, description="Filtrar MD1/MD3/MD5"),
-    limit: int = Query(50, ge=1, le=200),
+    limit: Optional[int] = Query(None, ge=1, description="Por padrão retorna todas as séries"),
     offset: int = Query(0, ge=0),
 ):
     """

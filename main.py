@@ -254,6 +254,11 @@ def fetch_series_payload(
             "away_team_icon": s["team_b_icon"],
             "home_score": 0,
             "away_score": 0,
+            # aliases inspirados no Excel
+            "data": str(s["match_date"]),
+            "partida": s["match_number"],
+            "etapa": s["stage"],
+            "dia": s["day"],
             # aliases de compatibilidade
             "team_a": s["team_a"],
             "team_a_tag": s["team_a_tag"],
@@ -295,17 +300,22 @@ def fetch_series_payload(
     players_rows = query("""
         SELECT
             gp.game_id,
+            gp.team_id,
             gp.side,
             gp.role,
             p.nickname,
+            t.name AS team,
+            t.tag AS team_tag,
             c.name AS champion,
             gp.kills,
             gp.deaths,
             gp.assists,
             gp.gold,
-            gp.level
+            gp.level,
+            gp.victory
         FROM game_players gp
         JOIN players p ON p.id = gp.player_id
+        JOIN teams t ON t.id = gp.team_id
         JOIN champions c ON c.id = gp.champion_id
         WHERE gp.game_id = ANY(%s)
         ORDER BY
@@ -318,8 +328,11 @@ def fetch_series_payload(
         SELECT
             gb.game_id,
             gb.team_id,
+            t.name AS team,
+            t.tag AS team_tag,
             c.name AS champion
         FROM game_bans gb
+        JOIN teams t ON t.id = gb.team_id
         JOIN champions c ON c.id = gb.champion_id
         WHERE gb.game_id = ANY(%s)
         ORDER BY gb.game_id, gb.id
@@ -336,12 +349,17 @@ def fetch_series_payload(
             "game_id": g["game_id"],
             "game_number": g["game_number"],
             "winner_side": g["winner_side"],
+            "lado_vencedor": g["winner_side"],
             "duration": fmt_duration(g["duration_sec"]),
             "duration_sec": g["duration_sec"],
+            "tempo": fmt_duration(g["duration_sec"]),
+            "tempo_segundos": g["duration_sec"],
             "blue": {
                 "team_id": g["blue_team_id"],
                 "team": g["blue_team"],
                 "tag": g["blue_team_tag"],
+                "side": "AZUL",
+                "lado": "AZUL",
                 "bans": [],
                 "players": [],
             },
@@ -349,9 +367,12 @@ def fetch_series_payload(
                 "team_id": g["red_team_id"],
                 "team": g["red_team"],
                 "tag": g["red_team_tag"],
+                "side": "VERMELHO",
+                "lado": "VERMELHO",
                 "bans": [],
                 "players": [],
             },
+            "bans_detail": [],
         }
 
         series_obj["games"].append(game_obj)
@@ -371,10 +392,23 @@ def fetch_series_payload(
         game_obj = game_map.get(b["game_id"])
         if not game_obj:
             continue
+
+        ban_side = None
         if b["team_id"] == game_obj["blue"]["team_id"]:
             game_obj["blue"]["bans"].append(b["champion"])
+            ban_side = "AZUL"
         elif b["team_id"] == game_obj["red"]["team_id"]:
             game_obj["red"]["bans"].append(b["champion"])
+            ban_side = "VERMELHO"
+
+        game_obj["bans_detail"].append({
+            "team_id": b["team_id"],
+            "team": b["team"],
+            "team_tag": b["team_tag"],
+            "side": ban_side,
+            "lado": ban_side,
+            "champion": b["champion"],
+        })
 
     for pr in players_rows:
         game_obj = game_map.get(pr["game_id"])
@@ -382,14 +416,24 @@ def fetch_series_payload(
             continue
 
         payload = {
+            "team_id": pr["team_id"],
+            "team": pr["team"],
+            "team_tag": pr["team_tag"],
             "nickname": pr["nickname"],
             "role": pr["role"],
             "champion": pr["champion"],
+            "hero_name": pr["champion"],
             "kills": pr["kills"],
             "deaths": pr["deaths"],
             "assists": pr["assists"],
+            "k": pr["kills"],
+            "d": pr["deaths"],
+            "a": pr["assists"],
             "gold": pr["gold"],
             "level": pr["level"],
+            "victory": pr["victory"],
+            "side": pr["side"],
+            "lado": pr["side"],
         }
 
         if pr["side"] == "AZUL":
@@ -920,8 +964,11 @@ def list_series(
         SELECT
             gb.game_id,
             gb.team_id,
+            t.name AS team,
+            t.tag AS team_tag,
             c.name AS champion
         FROM game_bans gb
+        JOIN teams t ON t.id = gb.team_id
         JOIN champions c ON c.id = gb.champion_id
         WHERE gb.game_id = ANY(%s)
         ORDER BY gb.game_id, gb.id
@@ -1023,13 +1070,23 @@ def get_game(game_id: int):
     """Detalhes de um jogo individual."""
     game = query_one("""
         SELECT
-            g.id, g.game_number, g.duration_sec, g.winner_side,
+            g.id,
+            g.game_number,
+            g.duration_sec,
+            g.winner_side,
             g.series_id,
+            s.match_date,
+            s.match_number,
+            s.stage,
+            s.day,
+            g.blue_team_id,
             bt.name AS blue_team,
             bt.tag AS blue_team_tag,
+            g.red_team_id,
             rt.name AS red_team,
             rt.tag AS red_team_tag
         FROM games g
+        JOIN series s ON s.id = g.series_id
         JOIN teams bt ON bt.id = g.blue_team_id
         JOIN teams rt ON rt.id = g.red_team_id
         WHERE g.id = %s
@@ -1041,15 +1098,29 @@ def get_game(game_id: int):
     game["duration_sec"] = int(game["duration_sec"]) if game.get("duration_sec") is not None else None
     game["duration_label"] = fmt_duration(game["duration_sec"])
     game["duration"] = game["duration_label"]
+    game["tempo"] = game["duration_label"]
+    game["tempo_segundos"] = game["duration_sec"]
+    game["lado_vencedor"] = game["winner_side"]
+    game["date"] = str(game["match_date"])
+    game["data"] = str(game["match_date"])
+    game["partida"] = game["match_number"]
+    game["etapa"] = game["stage"]
+    game["dia"] = game["day"]
 
     players = query("""
         SELECT
-            gp.side, gp.role,
+            gp.team_id,
+            gp.side,
+            gp.role,
             p.nickname,
             c.name AS champion,
             t.name AS team,
-            gp.gold, gp.level,
-            gp.kills, gp.deaths, gp.assists,
+            t.tag AS team_tag,
+            gp.gold,
+            gp.level,
+            gp.kills,
+            gp.deaths,
+            gp.assists,
             gp.victory
         FROM game_players gp
         JOIN players p ON p.id = gp.player_id
@@ -1062,30 +1133,61 @@ def get_game(game_id: int):
     """, (game_id,))
 
     bans = query("""
-        SELECT t.name AS team, c.name AS champion
+        SELECT
+            gb.team_id,
+            t.name AS team,
+            t.tag AS team_tag,
+            c.name AS champion
         FROM game_bans gb
         JOIN teams t ON t.id = gb.team_id
         JOIN champions c ON c.id = gb.champion_id
         WHERE gb.game_id = %s
+        ORDER BY gb.id
     """, (game_id,))
+
+    for player in players:
+        player["hero_name"] = player["champion"]
+        player["k"] = player["kills"]
+        player["d"] = player["deaths"]
+        player["a"] = player["assists"]
+        player["lado"] = player["side"]
 
     blue_players = [p for p in players if p["side"] == "AZUL"]
     red_players = [p for p in players if p["side"] == "VERMELHO"]
-    blue_bans = [b["champion"] for b in bans if b["team"] == game["blue_team"]]
-    red_bans = [b["champion"] for b in bans if b["team"] == game["red_team"]]
+    blue_bans = [b["champion"] for b in bans if b["team_id"] == game["blue_team_id"]]
+    red_bans = [b["champion"] for b in bans if b["team_id"] == game["red_team_id"]]
+
+    bans_detail = []
+    for ban in bans:
+        ban_side = "AZUL" if ban["team_id"] == game["blue_team_id"] else "VERMELHO" if ban["team_id"] == game["red_team_id"] else None
+        bans_detail.append({
+            "team_id": ban["team_id"],
+            "team": ban["team"],
+            "team_tag": ban["team_tag"],
+            "side": ban_side,
+            "lado": ban_side,
+            "champion": ban["champion"],
+        })
 
     game["blue"] = {
+        "team_id": game["blue_team_id"],
         "team": game["blue_team"],
         "tag": game["blue_team_tag"],
+        "side": "AZUL",
+        "lado": "AZUL",
         "players": blue_players,
         "bans": blue_bans,
     }
     game["red"] = {
+        "team_id": game["red_team_id"],
         "team": game["red_team"],
         "tag": game["red_team_tag"],
+        "side": "VERMELHO",
+        "lado": "VERMELHO",
         "players": red_players,
         "bans": red_bans,
     }
+    game["bans_detail"] = bans_detail
     return game
 
 

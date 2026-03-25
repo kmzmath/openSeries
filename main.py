@@ -1217,3 +1217,75 @@ def list_stages():
 @app.get("/api/health", tags=["Utilitários"])
 def health():
     return {"status": "ok"}
+
+
+# ─── OPENSERIES V1 (payloads enxutos) ─────────────────────
+
+def _openseries_v1_player_payload(player: dict) -> dict:
+    return {
+        "nickname": player.get("nickname"),
+        "role": player.get("role"),
+        "champion": player.get("champion"),
+        "level": player.get("level"),
+        "kills": player.get("kills"),
+        "deaths": player.get("deaths"),
+        "assists": player.get("assists"),
+        "gold": player.get("gold"),
+    }
+
+
+def _openseries_v1_series_payload(series_obj: dict) -> dict:
+    return {
+        "games": [
+            {
+                "duration": game.get("duration"),
+                "winner_side": game.get("winner_side"),
+                "game_number": game.get("game_number"),
+                "blue": {
+                    "bans": game.get("blue", {}).get("bans", []),
+                    "players": [
+                        _openseries_v1_player_payload(player)
+                        for player in game.get("blue", {}).get("players", [])
+                    ],
+                },
+                "red": {
+                    "bans": game.get("red", {}).get("bans", []),
+                    "players": [
+                        _openseries_v1_player_payload(player)
+                        for player in game.get("red", {}).get("players", [])
+                    ],
+                },
+            }
+            for game in series_obj.get("games", [])
+        ]
+    }
+
+
+@app.get("/openseries/v1/agenda", tags=["OpenSeries V1"])
+def get_openseries_v1_agenda(
+    group: str = Query(..., min_length=1, max_length=10),
+):
+    """Agenda enxuta por grupo, somente com os campos usados atualmente no cliente."""
+    agenda = get_agenda(bracket_group=group)
+    return {
+        "group": group.strip().upper(),
+        "matches": [
+            {
+                "series_id": match.get("series_id"),
+                "home_team_tag": match.get("home_team_tag"),
+                "away_team_tag": match.get("away_team_tag"),
+                "home_score": match.get("home_score"),
+                "away_score": match.get("away_score"),
+                "date": match.get("date"),
+                "stage": match.get("stage"),
+            }
+            for match in agenda.get("matches", [])
+        ],
+    }
+
+
+@app.get("/openseries/v1/series/{series_id}", tags=["OpenSeries V1"])
+def get_openseries_v1_series(series_id: int):
+    """Detalhe enxuto da série, somente com os campos usados atualmente no cliente."""
+    full_series = get_series(series_id)
+    return _openseries_v1_series_payload(full_series)

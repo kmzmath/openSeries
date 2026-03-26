@@ -184,22 +184,6 @@ def group_series_by_best_of(series_list: list[dict]) -> dict:
     return grouped
 
 
-def apply_series_frontend_view(series_list: list[dict]) -> list[dict]:
-    """Adiciona aliases de layout para o front sem alterar a semântica canônica.
-
-    - games[].home = sempre o lado azul (coluna da esquerda na UI)
-    - games[].away = sempre o lado vermelho (coluna da direita na UI)
-    - series.home_team / series.away_team continuam representando team_a / team_b
-    """
-    for series in series_list:
-        for game in series.get("games", []):
-            game["home"] = game.get("blue")
-            game["away"] = game.get("red")
-            game["home_side"] = "AZUL"
-            game["away_side"] = "VERMELHO"
-    return series_list
-
-
 
 def fetch_series_payload(
     where_sql: str = "",
@@ -965,9 +949,9 @@ def list_series(
     stage: Optional[str] = Query(None, description="Filtrar por etapa"),
     team: Optional[str] = Query(None, description="Filtrar por nome do time"),
     best_of: Optional[int] = Query(None, ge=1, le=5, description="Filtrar MD1/MD3/MD5"),
-    view: Optional[str] = Query(None, pattern="^(frontend)$", description="Variante opcional de payload para o front-end"),
     limit: Optional[int] = Query(None, ge=1, description="Por padrão retorna todas as séries"),
     offset: int = Query(0, ge=0),
+    view: Optional[str] = Query(None, description="Variantes de payload, ex.: frontend"),
 ):
     """
     Endpoint unificado de confrontos.
@@ -990,8 +974,8 @@ def list_series(
     where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     ordered = fetch_series_payload(where_sql=where_sql, params=tuple(params), limit=limit, offset=offset)
 
-    if view == "frontend":
-        ordered = apply_series_frontend_view(ordered)
+    if _is_frontend_view(view):
+        ordered = [_apply_frontend_view_to_series_payload(series_obj) for series_obj in ordered]
 
     return {
         "series": ordered,
@@ -1120,15 +1104,16 @@ def list_series(
 @app.get("/api/series/{series_id}", tags=["Confrontos"])
 def get_series(
     series_id: int,
-    view: Optional[str] = Query(None, pattern="^(frontend)$", description="Variante opcional de payload para o front-end"),
+    view: Optional[str] = Query(None, description="Variantes de payload, ex.: frontend"),
 ):
     """Detalhes completos de uma série usando o mesmo payload do endpoint unificado."""
     ordered = fetch_series_payload(where_sql="WHERE s.id = %s", params=(series_id,))
     if not ordered:
         raise HTTPException(404, "Série não encontrada")
-    if view == "frontend":
-        ordered = apply_series_frontend_view(ordered)
-    return ordered[0]
+    series_obj = ordered[0]
+    if _is_frontend_view(view):
+        _apply_frontend_view_to_series_payload(series_obj)
+    return series_obj
 
 
 # ─── 6. JOGOS INDIVIDUAIS ──────────────────────────────────
@@ -1287,6 +1272,24 @@ def health():
     return {"status": "ok"}
 
 
+def _is_frontend_view(view: Optional[str]) -> bool:
+    return isinstance(view, str) and view.strip().lower() == "frontend"
+
+
+def _apply_frontend_aliases_to_game(game_obj: dict) -> dict:
+    game_obj["home"] = game_obj.get("blue", {})
+    game_obj["away"] = game_obj.get("red", {})
+    game_obj["home_side"] = "AZUL"
+    game_obj["away_side"] = "VERMELHO"
+    return game_obj
+
+
+def _apply_frontend_view_to_series_payload(series_obj: dict) -> dict:
+    for game in series_obj.get("games", []):
+        _apply_frontend_aliases_to_game(game)
+    return series_obj
+
+
 # ─── OPENSERIES V1 (payloads enxutos) ─────────────────────
 
 def _openseries_v1_player_payload(player: dict) -> dict:
@@ -1302,32 +1305,41 @@ def _openseries_v1_player_payload(player: dict) -> dict:
     }
 
 
-def _openseries_v1_series_payload(series_obj: dict) -> dict:
-    return {
-        "games": [
-            {
-                "duration": game.get("duration"),
-                "winner_side": game.get("winner_side"),
-                "game_number": game.get("game_number"),
-                "blue": {
-                    "bans": game.get("blue", {}).get("bans", []),
-                    "players": [
-                        _openseries_v1_player_payload(player)
-                        for player in game.get("blue", {}).get("players", [])
-                    ],
-                },
-                "red": {
-                    "bans": game.get("red", {}).get("bans", []),
-                    "players": [
-                        _openseries_v1_player_payload(player)
-                        for player in game.get("red", {}).get("players", [])
-                    ],
-                },
-            }
-            for game in series_obj.get("games", [])
-        ]
-    }
+def _openseries_v1_series_payload(series_obj: dict, view: Optional[str] = None) -> dict:
+    games_payload = []
 
+    for game in series_obj.get("games", []):
+        game_payload = {
+            "duration": game.get("duration"),
+            "winner_side": game.get("winner_side"),
+            "game_number": game.get("game_number"),
+            "blue": {
+                "tag": game.get("blue", {}).get("tag"),
+                "bans": game.get("blue", {}).get("bans", []),
+                "players": [
+                    _openseries_v1_player_payload(player)
+                    for player in game.get("blue", {}).get("players", [])
+                ],
+            },
+            "red": {
+                "tag": game.get("red", {}).get("tag"),
+                "bans": game.get("red", {}).get("bans", []),
+                "players": [
+                    _openseries_v1_player_payload(player)
+                    for player in game.get("red", {}).get("players", [])
+                ],
+            },
+        }
+
+        if view == "frontend":
+            game_payload["home"] = game_payload["blue"]
+            game_payload["away"] = game_payload["red"]
+            game_payload["home_side"] = "AZUL"
+            game_payload["away_side"] = "VERMELHO"
+
+        games_payload.append(game_payload)
+
+    return {"games": games_payload}
 
 @app.get("/openseries/v1/agenda", tags=["OpenSeries V1"])
 def get_openseries_v1_agenda(
@@ -1356,7 +1368,10 @@ def get_openseries_v1_agenda(
 
 
 @app.get("/openseries/v1/series/{series_id}", tags=["OpenSeries V1"])
-def get_openseries_v1_series(series_id: int):
+def get_openseries_v1_series(
+    series_id: int,
+    view: Optional[str] = Query(None, pattern="^(frontend)$", description="Variante opcional de payload para o front-end"),
+):
     """Detalhe enxuto da série, somente com os campos usados atualmente no cliente."""
-    full_series = get_series(series_id)
-    return _openseries_v1_series_payload(full_series)
+    full_series = get_series(series_id, view=view)
+    return _openseries_v1_series_payload(full_series, view=view)

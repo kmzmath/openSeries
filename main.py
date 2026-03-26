@@ -791,7 +791,11 @@ def get_team(team_id: int):
 def get_agenda(
     bracket_group: str = Query(..., min_length=1, max_length=10),
 ):
-    """Retorna a agenda fixa do grupo e, quando existir série cadastrada, também o placar."""
+    """Retorna a agenda fixa do grupo e, quando existir série cadastrada, também o placar.
+
+    Quando já existir ao menos um jogo na série, expõe também o lado de cada time
+    no primeiro jogo registrado (home_side / away_side).
+    """
     bracket_group = bracket_group.strip().upper()
 
     teams = query("""
@@ -862,8 +866,41 @@ def get_agenda(
         ORDER BY s.match_date, s.match_number
     """, (bracket_group, bracket_group))
 
+    game_side_rows = query("""
+        SELECT
+            s.id AS series_id,
+            g.game_number,
+            CASE
+                WHEN g.blue_team_id = s.team_a_id THEN 'AZUL'
+                WHEN g.red_team_id = s.team_a_id THEN 'VERMELHO'
+                ELSE NULL
+            END AS home_side,
+            CASE
+                WHEN g.blue_team_id = s.team_b_id THEN 'AZUL'
+                WHEN g.red_team_id = s.team_b_id THEN 'VERMELHO'
+                ELSE NULL
+            END AS away_side
+        FROM series s
+        JOIN teams ta ON ta.id = s.team_a_id
+        JOIN teams tb ON tb.id = s.team_b_id
+        JOIN games g ON g.series_id = s.id
+        WHERE ta.bracket_group = %s
+          AND tb.bracket_group = %s
+        ORDER BY s.id, g.game_number, g.id
+    """, (bracket_group, bracket_group))
+
+    all_game_sides_lookup: dict[int, list[dict]] = {}
+    for row in game_side_rows:
+        all_game_sides_lookup.setdefault(row["series_id"], []).append({
+            "game_number": row.get("game_number"),
+            "home_side": row.get("home_side"),
+            "away_side": row.get("away_side"),
+        })
+
     series_lookup: dict[tuple[int, int], dict] = {}
     for row in series_rows:
+        game_sides = all_game_sides_lookup.get(row["series_id"], [])
+        first_game = game_sides[0] if game_sides else {"home_side": None, "away_side": None}
         forward = {
             "series_id": row["series_id"],
             "match_id": row["series_id"],
@@ -875,6 +912,9 @@ def get_agenda(
             "best_of_label": f"MD{row['best_of']}",
             "home_score": row["team_a_score"],
             "away_score": row["team_b_score"],
+            "home_side": first_game.get("home_side"),
+            "away_side": first_game.get("away_side"),
+            "games_sides": game_sides,
         }
         series_lookup[(row["team_a_id"], row["team_b_id"])] = forward
 
@@ -894,6 +934,9 @@ def get_agenda(
                 "best_of_label": None,
                 "home_score": None,
                 "away_score": None,
+                "home_side": None,
+                "away_side": None,
+                "games_sides": [],
             })
 
     return agenda
@@ -1278,6 +1321,9 @@ def get_openseries_v1_agenda(
                 "away_score": match.get("away_score"),
                 "date": match.get("date"),
                 "stage": match.get("stage"),
+                "home_side": match.get("home_side"),
+                "away_side": match.get("away_side"),
+                "games_sides": match.get("games_sides", []),
             }
             for match in agenda.get("matches", [])
         ],

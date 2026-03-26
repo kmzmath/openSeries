@@ -1309,33 +1309,52 @@ def _openseries_v1_series_payload(series_obj: dict, view: Optional[str] = None) 
     games_payload = []
 
     for game in series_obj.get("games", []):
-        game_payload = {
-            "duration": game.get("duration"),
-            "winner_side": game.get("winner_side"),
-            "game_number": game.get("game_number"),
-            "blue": {
-                "tag": game.get("blue", {}).get("tag"),
-                "bans": game.get("blue", {}).get("bans", []),
-                "players": [
-                    _openseries_v1_player_payload(player)
-                    for player in game.get("blue", {}).get("players", [])
-                ],
-            },
-            "red": {
-                "tag": game.get("red", {}).get("tag"),
-                "bans": game.get("red", {}).get("bans", []),
-                "players": [
-                    _openseries_v1_player_payload(player)
-                    for player in game.get("red", {}).get("players", [])
-                ],
-            },
-        }
-
         if view == "frontend":
-            game_payload["home"] = game_payload["blue"]
-            game_payload["away"] = game_payload["red"]
-            game_payload["home_side"] = "AZUL"
-            game_payload["away_side"] = "VERMELHO"
+            game_payload = {
+                "duration": game.get("duration"),
+                "winner_side": game.get("winner_side"),
+                "game_number": game.get("game_number"),
+                "home": {
+                    "tag": game.get("blue", {}).get("tag"),
+                    "bans": game.get("blue", {}).get("bans", []),
+                    "players": [
+                        _openseries_v1_player_payload(player)
+                        for player in game.get("blue", {}).get("players", [])
+                    ],
+                },
+                "away": {
+                    "tag": game.get("red", {}).get("tag"),
+                    "bans": game.get("red", {}).get("bans", []),
+                    "players": [
+                        _openseries_v1_player_payload(player)
+                        for player in game.get("red", {}).get("players", [])
+                    ],
+                },
+                "home_side": "AZUL",
+                "away_side": "VERMELHO",
+            }
+        else:
+            game_payload = {
+                "duration": game.get("duration"),
+                "winner_side": game.get("winner_side"),
+                "game_number": game.get("game_number"),
+                "blue": {
+                    "tag": game.get("blue", {}).get("tag"),
+                    "bans": game.get("blue", {}).get("bans", []),
+                    "players": [
+                        _openseries_v1_player_payload(player)
+                        for player in game.get("blue", {}).get("players", [])
+                    ],
+                },
+                "red": {
+                    "tag": game.get("red", {}).get("tag"),
+                    "bans": game.get("red", {}).get("bans", []),
+                    "players": [
+                        _openseries_v1_player_payload(player)
+                        for player in game.get("red", {}).get("players", [])
+                    ],
+                },
+            }
 
         games_payload.append(game_payload)
 

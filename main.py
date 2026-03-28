@@ -458,7 +458,7 @@ PLAYER_SORT = {
 TEAM_SORT = {
     "team_name", "games_played", "wins", "losses", "win_rate",
     "avg_kills", "avg_deaths", "avg_assists", "avg_gold",
-    "bracket_group", "status", "seed", "tie_breaker",
+    "bracket_group", "status", "seed", "tie_breaker", "team_kda",
 }
 
 
@@ -612,7 +612,7 @@ def get_player(player_id: int):
             SUM(gp.deaths) AS deaths,
             SUM(gp.assists) AS assists,
             ROUND((SUM(gp.kills) + SUM(gp.assists))::NUMERIC
-                  / NULLIF(SUM(gp.deaths), 0), 2) AS kda
+                  / GREATEST(SUM(gp.deaths), 1), 2) AS kda
         FROM game_players gp
         JOIN champions c ON c.id = gp.champion_id
         WHERE gp.player_id = %s
@@ -640,6 +640,8 @@ def list_teams(
     if sort_by not in TEAM_SORT:
         sort_by = "games_played"
 
+    order_expr = "COALESCE(tk.team_kda, 0)" if sort_by == "team_kda" else f"mts.{sort_by}"
+
     conditions = []
     params = []
 
@@ -659,12 +661,20 @@ def list_teams(
               mts.*,
               t.tag AS team_tag,
               gs.starts_at AS group_start_at,
+              COALESCE(tk.team_kda, 0) AS team_kda,
               COALESCE(l.lineup, '[]'::json) AS lineup
             FROM mv_team_stats mts
             JOIN public.teams t
               ON t.id = mts.team_id
             LEFT JOIN public.group_schedules gs
               ON gs.bracket_group = mts.bracket_group
+            LEFT JOIN LATERAL (
+              SELECT
+                ROUND((SUM(gp.kills) + SUM(gp.assists))::NUMERIC
+                    / NULLIF(SUM(gp.deaths), 0), 2) AS team_kda
+              FROM public.game_players gp
+              WHERE gp.team_id = mts.team_id
+            ) tk ON TRUE
             LEFT JOIN LATERAL (
               SELECT json_agg(
                        json_build_object('player_id', p.id, 'nickname', p.nickname)
@@ -674,21 +684,29 @@ def list_teams(
               WHERE p.team_id = mts.team_id
             ) l ON TRUE
             {where}
-            ORDER BY mts.{sort_by} {order.upper()} NULLS LAST
+            ORDER BY {order_expr} {order.upper()} NULLS LAST
         """
     else:
         sql = f"""
             SELECT
               mts.*,
               t.tag AS team_tag,
-              gs.starts_at AS group_start_at
+              gs.starts_at AS group_start_at,
+              COALESCE(tk.team_kda, 0) AS team_kda
             FROM mv_team_stats mts
             JOIN public.teams t
               ON t.id = mts.team_id
             LEFT JOIN public.group_schedules gs
               ON gs.bracket_group = mts.bracket_group
+            LEFT JOIN LATERAL (
+              SELECT
+                ROUND((SUM(gp.kills) + SUM(gp.assists))::NUMERIC
+                    / NULLIF(SUM(gp.deaths), 0), 2) AS team_kda
+              FROM public.game_players gp
+              WHERE gp.team_id = mts.team_id
+            ) tk ON TRUE
             {where}
-            ORDER BY mts.{sort_by} {order.upper()} NULLS LAST
+            ORDER BY {order_expr} {order.upper()} NULLS LAST
         """
 
     teams = query(sql, tuple(params))
@@ -726,12 +744,20 @@ def get_team(team_id: int):
         SELECT
             mts.*,
             t.tag AS team_tag,
-            gs.starts_at AS group_start_at
+            gs.starts_at AS group_start_at,
+            COALESCE(tk.team_kda, 0) AS team_kda
         FROM mv_team_stats mts
         JOIN public.teams t
           ON t.id = mts.team_id
         LEFT JOIN public.group_schedules gs
           ON gs.bracket_group = mts.bracket_group
+        LEFT JOIN LATERAL (
+          SELECT
+            ROUND((SUM(gp.kills) + SUM(gp.assists))::NUMERIC
+                / NULLIF(SUM(gp.deaths), 0), 2) AS team_kda
+          FROM public.game_players gp
+          WHERE gp.team_id = mts.team_id
+        ) tk ON TRUE
         WHERE mts.team_id = %s
     """, (team_id,))
     if not row:
@@ -751,7 +777,7 @@ def get_team(team_id: int):
                 SUM(gp.deaths) AS deaths,
                 SUM(gp.assists) AS assists,
                 ROUND((SUM(gp.kills) + SUM(gp.assists))::NUMERIC
-                    / NULLIF(SUM(gp.deaths), 0), 2) AS kda
+                    / GREATEST(SUM(gp.deaths), 1), 2) AS kda
             FROM game_players gp
             WHERE gp.team_id = %s
             GROUP BY gp.player_id

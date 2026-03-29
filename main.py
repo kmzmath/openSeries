@@ -101,6 +101,18 @@ def fmt_datetime_br(value) -> str | None:
     return dt.strftime("%d/%m %H:%M")
 
 
+def build_game_duration_payload(seconds: int | None, is_walkover: bool) -> dict:
+    raw_seconds = int(seconds) if seconds is not None else None
+    label = "W.O." if is_walkover else fmt_duration(raw_seconds)
+    return {
+        "duration_sec": raw_seconds,
+        "duration_label": label,
+        "duration": label,
+        "tempo": label,
+        "tempo_segundos": raw_seconds,
+    }
+
+
 def verify_admin(x_api_key: str = Header(None)):
     if x_api_key != ADMIN_API_KEY:
         raise HTTPException(403, "API key inválida")
@@ -278,6 +290,7 @@ def fetch_series_payload(
             g.series_id,
             g.game_number,
             g.duration_sec,
+            COALESCE(g.is_walkover, FALSE) AS is_walkover,
             g.winner_side,
             g.blue_team_id,
             bt.name AS blue_team,
@@ -345,15 +358,17 @@ def fetch_series_payload(
         if not series_obj:
             continue
 
+        is_walkover = bool(g.get("is_walkover"))
+        duration_payload = build_game_duration_payload(g.get("duration_sec"), is_walkover)
+
         game_obj = {
             "game_id": g["game_id"],
             "game_number": g["game_number"],
             "winner_side": g["winner_side"],
             "lado_vencedor": g["winner_side"],
-            "duration": fmt_duration(g["duration_sec"]),
-            "duration_sec": g["duration_sec"],
-            "tempo": fmt_duration(g["duration_sec"]),
-            "tempo_segundos": g["duration_sec"],
+            "is_walkover": is_walkover,
+            "walkover": is_walkover,
+            **duration_payload,
             "blue": {
                 "team_id": g["blue_team_id"],
                 "team": g["blue_team"],
@@ -474,34 +489,55 @@ TEAM_SORT = {
 def get_overview():
     """
     Estatísticas gerais do campeonato.
-    - total_games: jogos individuais (não séries)
+    - total_games: todos os jogos registrados, incluindo W.O.
+    - total_played_games: jogos efetivamente disputados (exclui W.O.)
+    - total_walkovers: jogos marcados como W.O.
     - total_series: séries (partidas no sentido do Excel)
-    - avg_duration_sec: duração média em segundos (campo canônico)
-    - avg_duration_label: duração média formatada em MM:SS (compatibilidade/UI)
+    - avg_duration_sec: duração média em segundos apenas dos jogos disputados
+    - avg_duration_label: duração média formatada em MM:SS apenas dos jogos disputados
     """
     row = query_one("""
         SELECT
-            (SELECT COUNT(*) FROM games)  AS total_games,
+            (SELECT COUNT(*) FROM games) AS total_games,
+            (
+                SELECT COUNT(*)
+                FROM games
+                WHERE NOT COALESCE(is_walkover, FALSE)
+            ) AS total_played_games,
+            (
+                SELECT COUNT(*)
+                FROM games
+                WHERE COALESCE(is_walkover, FALSE)
+            ) AS total_walkovers,
             (SELECT COUNT(*) FROM series) AS total_series,
             (SELECT COUNT(*) FROM players) AS unique_players,
             (SELECT COUNT(DISTINCT champion_id) FROM game_players) AS unique_champions,
-            (SELECT ROUND(AVG(duration_sec)) FROM games) AS avg_duration_sec,
+            (
+                SELECT ROUND(AVG(duration_sec))
+                FROM games
+                WHERE NOT COALESCE(is_walkover, FALSE)
+            ) AS avg_duration_sec,
             (
                 SELECT ROUND(
                     SUM(CASE WHEN winner_side = 'AZUL' THEN 1 ELSE 0 END) * 100.0
                     / NULLIF(COUNT(*), 0), 1
-                ) FROM games
+                )
+                FROM games
+                WHERE NOT COALESCE(is_walkover, FALSE)
             ) AS blue_winrate,
             (
                 SELECT ROUND(
                     SUM(CASE WHEN winner_side = 'VERMELHO' THEN 1 ELSE 0 END) * 100.0
                     / NULLIF(COUNT(*), 0), 1
-                ) FROM games
+                )
+                FROM games
+                WHERE NOT COALESCE(is_walkover, FALSE)
             ) AS red_winrate
     """)
     if row:
         avg_sec = row.get("avg_duration_sec")
-        row["avg_duration_label"] = fmt_duration(avg_sec)
+        row["avg_duration_sec"] = int(avg_sec) if avg_sec is not None else None
+        row["avg_duration_label"] = fmt_duration(row["avg_duration_sec"]) if row["avg_duration_sec"] is not None else None
         row["avg_duration"] = row["avg_duration_label"]
     return row
 
@@ -1008,124 +1044,6 @@ def list_series(
         "by_best_of": group_series_by_best_of(ordered),
     }
 
-    game_ids = [g["game_id"] for g in games_rows]
-
-    # 3) Players de todos os jogos (ordenados por side e role)
-    players_rows = query("""
-        SELECT
-            gp.game_id,
-            gp.side,
-            gp.role,
-            p.nickname,
-            c.name AS champion,
-            gp.kills,
-            gp.deaths,
-            gp.assists,
-            gp.gold
-        FROM game_players gp
-        JOIN players p ON p.id = gp.player_id
-        JOIN champions c ON c.id = gp.champion_id
-        WHERE gp.game_id = ANY(%s)
-        ORDER BY
-            gp.game_id,
-            CASE gp.side WHEN 'AZUL' THEN 0 ELSE 1 END,
-            ARRAY_POSITION(ARRAY['TOP','JG','MID','ADC','SUP'], gp.role)
-    """, (game_ids,))
-
-    # 4) Bans de todos os jogos (ORDER BY p/ ordem estável)
-    bans_rows = query("""
-        SELECT
-            gb.game_id,
-            gb.team_id,
-            t.name AS team,
-            t.tag AS team_tag,
-            c.name AS champion
-        FROM game_bans gb
-        JOIN teams t ON t.id = gb.team_id
-        JOIN champions c ON c.id = gb.champion_id
-        WHERE gb.game_id = ANY(%s)
-        ORDER BY gb.game_id, gb.id
-    """, (game_ids,))
-
-    # Montagem: mapa de game_id -> objeto game
-    game_map: dict[int, dict] = {}
-
-    for g in games_rows:
-        sid = g["series_id"]
-        s = series_map.get(sid)
-        if not s:
-            continue
-
-        game_obj = {
-            "game_id": g["game_id"],
-            "game_number": g["game_number"],
-            "winner_side": g["winner_side"],
-            "duration": fmt_duration(g["duration_sec"]),
-            "blue": {
-                "team": g["blue_team"],
-                "bans": [],
-                "players": [],
-            },
-            "red": {
-                "team": g["red_team"],
-                "bans": [],
-                "players": [],
-            },
-            # internos p/ atribuir bans e wins
-            "_blue_team_id": g["blue_team_id"],
-            "_red_team_id": g["red_team_id"],
-        }
-
-        s["games"].append(game_obj)
-        s["total_games"] += 1
-
-        # wins por team_a/team_b (por time vencedor)
-        winner_team_id = g["blue_team_id"] if g["winner_side"] == "AZUL" else g["red_team_id"]
-        if winner_team_id == s["_team_a_id"]:
-            s["team_a_wins"] += 1
-        elif winner_team_id == s["_team_b_id"]:
-            s["team_b_wins"] += 1
-
-        game_map[g["game_id"]] = game_obj
-
-    # Atribuir bans para blue/red via team_id
-    for b in bans_rows:
-        game_obj = game_map.get(b["game_id"])
-        if not game_obj:
-            continue
-        if b["team_id"] == game_obj["_blue_team_id"]:
-            game_obj["blue"]["bans"].append(b["champion"])
-        elif b["team_id"] == game_obj["_red_team_id"]:
-            game_obj["red"]["bans"].append(b["champion"])
-
-    # Atribuir players para blue/red via side
-    for pr in players_rows:
-        game_obj = game_map.get(pr["game_id"])
-        if not game_obj:
-            continue
-        payload = {
-            "nickname": pr["nickname"],
-            "champion": pr["champion"],
-            "kills": pr["kills"],
-            "deaths": pr["deaths"],
-            "assists": pr["assists"],
-            "gold": pr["gold"],
-        }
-        if pr["side"] == "AZUL":
-            game_obj["blue"]["players"].append(payload)
-        else:
-            game_obj["red"]["players"].append(payload)
-
-    # Remover campos internos antes de retornar
-    ordered = [series_map[s["id"]] for s in series_rows]
-    for s in ordered:
-        s.pop("_team_a_id", None)
-        s.pop("_team_b_id", None)
-        for g in s["games"]:
-            g.pop("_blue_team_id", None)
-            g.pop("_red_team_id", None)
-
-    return ordered
 
 @app.get("/api/series/{series_id}", tags=["Confrontos"])
 def get_series(
@@ -1152,6 +1070,7 @@ def get_game(game_id: int):
             g.id,
             g.game_number,
             g.duration_sec,
+            COALESCE(g.is_walkover, FALSE) AS is_walkover,
             g.winner_side,
             g.series_id,
             s.match_date,
@@ -1174,11 +1093,10 @@ def get_game(game_id: int):
     if not game:
         raise HTTPException(404, "Jogo não encontrado")
 
-    game["duration_sec"] = int(game["duration_sec"]) if game.get("duration_sec") is not None else None
-    game["duration_label"] = fmt_duration(game["duration_sec"])
-    game["duration"] = game["duration_label"]
-    game["tempo"] = game["duration_label"]
-    game["tempo_segundos"] = game["duration_sec"]
+    is_walkover = bool(game.get("is_walkover"))
+    game["is_walkover"] = is_walkover
+    game["walkover"] = is_walkover
+    game.update(build_game_duration_payload(game.get("duration_sec"), is_walkover))
     game["lado_vencedor"] = game["winner_side"]
     game["date"] = str(game["match_date"])
     game["data"] = str(game["match_date"])
@@ -1340,6 +1258,7 @@ def _openseries_v1_series_payload(series_obj: dict, view: Optional[str] = None) 
                 "duration": game.get("duration"),
                 "winner_side": game.get("winner_side"),
                 "game_number": game.get("game_number"),
+                "is_walkover": game.get("is_walkover", False),
                 "home": {
                     "tag": game.get("blue", {}).get("tag"),
                     "bans": game.get("blue", {}).get("bans", []),
@@ -1364,6 +1283,7 @@ def _openseries_v1_series_payload(series_obj: dict, view: Optional[str] = None) 
                 "duration": game.get("duration"),
                 "winner_side": game.get("winner_side"),
                 "game_number": game.get("game_number"),
+                "is_walkover": game.get("is_walkover", False),
                 "blue": {
                     "tag": game.get("blue", {}).get("tag"),
                     "bans": game.get("blue", {}).get("bans", []),

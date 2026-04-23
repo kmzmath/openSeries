@@ -1306,29 +1306,173 @@ def _openseries_v1_series_payload(series_obj: dict, view: Optional[str] = None) 
 
     return {"games": games_payload}
 
+# Atalhos de etapa para o front-end (case-insensitive). Valor com '%' vira ILIKE.
+STAGE_ALIASES = {
+    "playoffs":     "Playoffs - %",         # todo o mata-mata
+    "upper":        "Playoffs - % Upper",   # Quartas / Semi / Final Upper
+    "lower":        "Playoffs - Lower %",   # Lower 1-4 Fase + Lower Semi + Lower Final
+    "grande_final": "Playoffs - Grande Final",
+    "groups":       "Fase de Grupos",
+    "grupos":       "Fase de Grupos",
+}
+
+
+def _openseries_v1_match_payload(match: dict) -> dict:
+    """Mesma shape enxuta usada hoje pelo front (não mudar sem coordenar)."""
+    return {
+        "series_id":     match.get("series_id"),
+        "home_team_tag": match.get("home_team_tag"),
+        "away_team_tag": match.get("away_team_tag"),
+        "home_score":    match.get("home_score"),
+        "away_score":    match.get("away_score"),
+        "date":          match.get("date"),
+        "stage":         match.get("stage"),
+        "home_side":     match.get("home_side"),
+        "away_side":     match.get("away_side"),
+        "games_sides":   match.get("games_sides", []),
+    }
+
+
+def _fetch_agenda_by_stage(stage: str, group: Optional[str] = None) -> list[dict]:
+    """Busca séries por etapa (opcionalmente filtrando por grupo de algum dos times).
+
+    Retorna a mesma shape de match consumida pelo front — só que aqui os matches
+    vêm direto da tabela `series` (sem template fixo de round-robin)."""
+    stage_clean = stage.strip()
+    alias = STAGE_ALIASES.get(stage_clean.lower())
+
+    conditions: list[str] = []
+    params: list = []
+
+    if alias and "%" in alias:
+        conditions.append("s.stage ILIKE %s")
+        params.append(alias)
+    elif alias:
+        conditions.append("s.stage = %s")
+        params.append(alias)
+    else:
+        conditions.append("s.stage = %s")
+        params.append(stage_clean)
+
+    if group:
+        g = group.strip().upper()
+        conditions.append("(ta.bracket_group = %s OR tb.bracket_group = %s)")
+        params.extend([g, g])
+
+    where_sql = "WHERE " + " AND ".join(conditions)
+
+    series_rows = query(f"""
+        SELECT
+            s.id AS series_id,
+            s.match_date,
+            s.match_number,
+            s.stage,
+            s.day,
+            s.best_of,
+            s.team_a_id,
+            s.team_b_id,
+            ta.tag AS home_team_tag,
+            tb.tag AS away_team_tag,
+            COALESCE(SUM(CASE
+                WHEN g.winner_side = 'AZUL'     AND g.blue_team_id = s.team_a_id THEN 1
+                WHEN g.winner_side = 'VERMELHO' AND g.red_team_id  = s.team_a_id THEN 1
+                ELSE 0 END), 0) AS home_score,
+            COALESCE(SUM(CASE
+                WHEN g.winner_side = 'AZUL'     AND g.blue_team_id = s.team_b_id THEN 1
+                WHEN g.winner_side = 'VERMELHO' AND g.red_team_id  = s.team_b_id THEN 1
+                ELSE 0 END), 0) AS away_score
+        FROM series s
+        JOIN teams ta ON ta.id = s.team_a_id
+        JOIN teams tb ON tb.id = s.team_b_id
+        LEFT JOIN games g ON g.series_id = s.id
+        {where_sql}
+        GROUP BY s.id, s.match_date, s.match_number, s.stage, s.day, s.best_of,
+                 s.team_a_id, s.team_b_id, ta.tag, tb.tag
+        ORDER BY s.match_date, s.match_number
+    """, tuple(params))
+
+    if not series_rows:
+        return []
+
+    series_ids = [r["series_id"] for r in series_rows]
+    sides_rows = query("""
+        SELECT
+            s.id AS series_id,
+            g.game_number,
+            CASE WHEN g.blue_team_id = s.team_a_id THEN 'AZUL'
+                 WHEN g.red_team_id  = s.team_a_id THEN 'VERMELHO' END AS home_side,
+            CASE WHEN g.blue_team_id = s.team_b_id THEN 'AZUL'
+                 WHEN g.red_team_id  = s.team_b_id THEN 'VERMELHO' END AS away_side
+        FROM series s
+        JOIN games g ON g.series_id = s.id
+        WHERE s.id = ANY(%s)
+        ORDER BY s.id, g.game_number, g.id
+    """, (series_ids,))
+
+    sides_lookup: dict[int, list[dict]] = {}
+    for row in sides_rows:
+        sides_lookup.setdefault(row["series_id"], []).append({
+            "game_number": row["game_number"],
+            "home_side":   row["home_side"],
+            "away_side":   row["away_side"],
+        })
+
+    matches: list[dict] = []
+    for r in series_rows:
+        sides = sides_lookup.get(r["series_id"], [])
+        first = sides[0] if sides else {"home_side": None, "away_side": None}
+        matches.append({
+            "series_id":     r["series_id"],
+            "home_team_tag": r["home_team_tag"],
+            "away_team_tag": r["away_team_tag"],
+            "home_score":    r["home_score"],
+            "away_score":    r["away_score"],
+            "date":          str(r["match_date"]),
+            "stage":         r["stage"],
+            "home_side":     first["home_side"],
+            "away_side":     first["away_side"],
+            "games_sides":   sides,
+        })
+    return matches
+
+
 @app.get("/openseries/v1/agenda", tags=["OpenSeries V1"])
 def get_openseries_v1_agenda(
-    group: str = Query(..., min_length=1, max_length=10),
+    group: Optional[str] = Query(
+        None, min_length=1, max_length=10,
+        description="Grupo do bracket (A, B, ...). Comportamento original.",
+    ),
+    stage: Optional[str] = Query(
+        None, min_length=1, max_length=50,
+        description=(
+            "Filtra por etapa. Aceita nome exato (ex.: 'Playoffs - Quartas Upper') "
+            "ou atalhos: 'playoffs', 'lower', 'groups'. Pode ser combinado com 'group'."
+        ),
+    ),
 ):
-    """Agenda enxuta por grupo, somente com os campos usados atualmente no cliente."""
-    agenda = get_agenda(bracket_group=group)
+    """Agenda enxuta, somente com os campos usados atualmente no cliente.
+
+    - Com `group` apenas: agenda fixa do grupo (round-robin) — comportamento original.
+    - Com `stage`: lista as séries daquela etapa (ex.: playoffs).
+    - Com `stage` + `group`: séries da etapa envolvendo times do grupo informado.
+    """
+    if not group and not stage:
+        raise HTTPException(400, "Informe ao menos 'group' ou 'stage'.")
+
+    # Caminho legado — intocado.
+    if group and not stage:
+        agenda = get_agenda(bracket_group=group)
+        return {
+            "group":   group.strip().upper(),
+            "matches": [_openseries_v1_match_payload(m) for m in agenda.get("matches", [])],
+        }
+
+    # Caminho novo: filtro por etapa (com ou sem grupo).
+    matches = _fetch_agenda_by_stage(stage=stage, group=group)
     return {
-        "group": group.strip().upper(),
-        "matches": [
-            {
-                "series_id": match.get("series_id"),
-                "home_team_tag": match.get("home_team_tag"),
-                "away_team_tag": match.get("away_team_tag"),
-                "home_score": match.get("home_score"),
-                "away_score": match.get("away_score"),
-                "date": match.get("date"),
-                "stage": match.get("stage"),
-                "home_side": match.get("home_side"),
-                "away_side": match.get("away_side"),
-                "games_sides": match.get("games_sides", []),
-            }
-            for match in agenda.get("matches", [])
-        ],
+        "group":   group.strip().upper() if group else None,
+        "stage":   stage.strip(),
+        "matches": matches,
     }
 
 

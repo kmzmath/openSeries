@@ -189,7 +189,7 @@ def build_group_agenda(
 
 
 def group_series_by_best_of(series_list: list[dict]) -> dict:
-    grouped = {"MD1": [], "MD3": [], "MD5": []}
+    grouped = {"MD1": [], "MD3": [], "MD5": [], "MD7": []}
     for item in series_list:
         key = f"MD{item['best_of']}"
         grouped.setdefault(key, []).append(item)
@@ -1010,7 +1010,7 @@ def get_agenda(
 def list_series(
     stage: Optional[str] = Query(None, description="Filtrar por etapa"),
     team: Optional[str] = Query(None, description="Filtrar por nome do time"),
-    best_of: Optional[int] = Query(None, ge=1, le=5, description="Filtrar MD1/MD3/MD5"),
+    best_of: Optional[int] = Query(None, ge=1, le=7, description="Filtrar MD1/MD3/MD5/MD7"),
     limit: Optional[int] = Query(None, ge=1, description="Por padrão retorna todas as séries"),
     offset: int = Query(0, ge=0),
     view: Optional[str] = Query(None, description="Variantes de payload, ex.: frontend"),

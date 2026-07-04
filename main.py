@@ -317,6 +317,9 @@ def fetch_series_payload(
             gp.side,
             gp.role,
             p.nickname,
+            p.status::text AS status,
+            p.status::text AS approval_status,
+            CASE WHEN p.status = 'APROVADO' THEN 'Aprovado' ELSE 'Reprovado' END AS status_label,
             t.name AS team,
             t.tag AS team_tag,
             c.name AS champion,
@@ -435,6 +438,9 @@ def fetch_series_payload(
             "team": pr["team"],
             "team_tag": pr["team_tag"],
             "nickname": pr["nickname"],
+            "status": pr.get("status"),
+            "approval_status": pr.get("approval_status"),
+            "status_label": pr.get("status_label"),
             "role": pr["role"],
             "champion": pr["champion"],
             "hero_name": pr["champion"],
@@ -469,6 +475,7 @@ CHAMPION_SORT = {
 PLAYER_SORT = {
     "nickname", "games_played", "wins", "losses", "win_rate",
     "total_kills", "total_deaths", "total_assists", "kda", "avg_gold",
+    "status", "approval_status",
 }
 TEAM_SORT = {
     "team_name", "games_played", "wins", "losses", "win_rate",
@@ -588,6 +595,7 @@ def get_champion(champion_id: int):
 def list_players(
     sort_by: str = Query("games_played"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
+    status: Optional[str] = Query(None, pattern="^(APROVADO|REPROVADO)$"),
     limit: Optional[int] = Query(None, ge=1),
     offset: int = Query(0, ge=0),
 ):
@@ -598,18 +606,28 @@ def list_players(
     if sort_by not in PLAYER_SORT:
         sort_by = "games_played"
 
+    order_expr = "p.status" if sort_by in {"status", "approval_status"} else f"mps.{sort_by}"
+
     sql = f"""
         SELECT
         mps.*,
         p.team_id,
+        p.status::text AS status,
+        p.status::text AS approval_status,
+        CASE WHEN p.status = 'APROVADO' THEN 'Aprovado' ELSE 'Reprovado' END AS status_label,
         t.name AS team_name,
         t.icon_url AS team_icon_url
         FROM mv_player_stats mps
         JOIN players p ON p.id = mps.player_id
         LEFT JOIN teams t ON t.id = p.team_id
-        ORDER BY mps.{sort_by} {order.upper()} NULLS LAST
     """
     params = []
+    if status:
+        sql += "\n        WHERE p.status = %s"
+        params.append(status)
+
+    sql += f"\n        ORDER BY {order_expr} {order.upper()} NULLS LAST"
+
     if limit is not None:
         sql += "\n        LIMIT %s"
         params.append(limit)
@@ -629,6 +647,9 @@ def get_player(player_id: int):
         SELECT
         mps.*,
         p.team_id,
+        p.status::text AS status,
+        p.status::text AS approval_status,
+        CASE WHEN p.status = 'APROVADO' THEN 'Aprovado' ELSE 'Reprovado' END AS status_label,
         t.name AS team_name,
         t.icon_url AS team_icon_url
         FROM mv_player_stats mps
@@ -713,8 +734,16 @@ def list_teams(
             ) tk ON TRUE
             LEFT JOIN LATERAL (
               SELECT json_agg(
-                       json_build_object('player_id', p.id, 'nickname', p.nickname)
-                       ORDER BY p.nickname
+                       json_build_object(
+                         'player_id', p.id,
+                         'nickname', p.nickname,
+                         'status', p.status::text,
+                         'approval_status', p.status::text,
+                         'status_label', CASE WHEN p.status = 'APROVADO' THEN 'Aprovado' ELSE 'Reprovado' END
+                       )
+                       ORDER BY
+                         CASE p.status WHEN 'REPROVADO' THEN 0 ELSE 1 END,
+                         p.nickname
                      ) AS lineup
               FROM players p
               WHERE p.team_id = mts.team_id
@@ -831,6 +860,9 @@ def get_team(team_id: int):
         SELECT
             p.id AS player_id,
             p.nickname,
+            p.status::text AS status,
+            p.status::text AS approval_status,
+            CASE WHEN p.status = 'APROVADO' THEN 'Aprovado' ELSE 'Reprovado' END AS status_label,
             rc.role AS main_role,
             COALESCE(a.games_for_team, 0) AS games_for_team,
             COALESCE(a.wins, 0) AS wins,
@@ -842,7 +874,10 @@ def get_team(team_id: int):
         LEFT JOIN agg a ON a.player_id = p.id
         LEFT JOIN role_counts rc ON rc.player_id = p.id AND rc.rn = 1
         WHERE p.team_id = %s
-        ORDER BY games_for_team DESC, p.nickname
+        ORDER BY
+            CASE p.status WHEN 'REPROVADO' THEN 0 ELSE 1 END,
+            games_for_team DESC,
+            p.nickname
     """, (team_id, team_id, team_id))
     row["lineup"] = roster
     return row
@@ -1110,6 +1145,9 @@ def get_game(game_id: int):
             gp.side,
             gp.role,
             p.nickname,
+            p.status::text AS status,
+            p.status::text AS approval_status,
+            CASE WHEN p.status = 'APROVADO' THEN 'Aprovado' ELSE 'Reprovado' END AS status_label,
             c.name AS champion,
             t.name AS team,
             t.tag AS team_tag,
@@ -1144,6 +1182,8 @@ def get_game(game_id: int):
 
     for player in players:
         player["hero_name"] = player["champion"]
+        player["approval_status"] = player.get("approval_status") or player.get("status")
+        player["status_label"] = player.get("status_label") or ("Aprovado" if player.get("status") == "APROVADO" else "Reprovado")
         player["k"] = player["kills"]
         player["d"] = player["deaths"]
         player["a"] = player["assists"]
@@ -1239,6 +1279,9 @@ def _apply_frontend_view_to_series_payload(series_obj: dict) -> dict:
 def _openseries_v1_player_payload(player: dict) -> dict:
     return {
         "nickname": player.get("nickname"),
+        "status": player.get("status"),
+        "approval_status": player.get("approval_status") or player.get("status"),
+        "status_label": player.get("status_label"),
         "role": player.get("role"),
         "champion": player.get("champion"),
         "level": player.get("level"),

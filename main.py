@@ -475,7 +475,6 @@ CHAMPION_SORT = {
 PLAYER_SORT = {
     "nickname", "games_played", "wins", "losses", "win_rate",
     "total_kills", "total_deaths", "total_assists", "kda", "avg_gold",
-    "status", "approval_status",
 }
 TEAM_SORT = {
     "team_name", "games_played", "wins", "losses", "win_rate",
@@ -595,7 +594,6 @@ def get_champion(champion_id: int):
 def list_players(
     sort_by: str = Query("games_played"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
-    status: Optional[str] = Query(None, pattern="^(APROVADO|REPROVADO)$"),
     limit: Optional[int] = Query(None, ge=1),
     offset: int = Query(0, ge=0),
 ):
@@ -605,8 +603,6 @@ def list_players(
     """
     if sort_by not in PLAYER_SORT:
         sort_by = "games_played"
-
-    order_expr = "p.status" if sort_by in {"status", "approval_status"} else f"mps.{sort_by}"
 
     sql = f"""
         SELECT
@@ -620,14 +616,9 @@ def list_players(
         FROM mv_player_stats mps
         JOIN players p ON p.id = mps.player_id
         LEFT JOIN teams t ON t.id = p.team_id
+        ORDER BY mps.{sort_by} {order.upper()} NULLS LAST
     """
     params = []
-    if status:
-        sql += "\n        WHERE p.status = %s"
-        params.append(status)
-
-    sql += f"\n        ORDER BY {order_expr} {order.upper()} NULLS LAST"
-
     if limit is not None:
         sql += "\n        LIMIT %s"
         params.append(limit)
@@ -741,9 +732,7 @@ def list_teams(
                          'approval_status', p.status::text,
                          'status_label', CASE WHEN p.status = 'APROVADO' THEN 'Aprovado' ELSE 'Reprovado' END
                        )
-                       ORDER BY
-                         CASE p.status WHEN 'REPROVADO' THEN 0 ELSE 1 END,
-                         p.nickname
+                       ORDER BY p.nickname
                      ) AS lineup
               FROM players p
               WHERE p.team_id = mts.team_id
@@ -874,10 +863,7 @@ def get_team(team_id: int):
         LEFT JOIN agg a ON a.player_id = p.id
         LEFT JOIN role_counts rc ON rc.player_id = p.id AND rc.rn = 1
         WHERE p.team_id = %s
-        ORDER BY
-            CASE p.status WHEN 'REPROVADO' THEN 0 ELSE 1 END,
-            games_for_team DESC,
-            p.nickname
+        ORDER BY games_for_team DESC, p.nickname
     """, (team_id, team_id, team_id))
     row["lineup"] = roster
     return row

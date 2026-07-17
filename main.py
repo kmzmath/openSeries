@@ -86,11 +86,22 @@ def _require_pool() -> pool.ThreadedConnectionPool:
 
 
 def _connection_is_broken(conn) -> bool:
-    return (
-        conn is None
-        or bool(conn.closed)
-        or conn.status == psycopg2.extensions.STATUS_BAD
-    )
+    """Retorna True quando a conexão já foi fechada ou marcada como inválida.
+
+    No psycopg2, ``connection.closed`` é 0 enquanto a conexão está aberta e um
+    valor diferente de 0 quando ela foi fechada ou detectada como quebrada.
+    Não existe ``psycopg2.extensions.STATUS_BAD``; ``connection.status``
+    representa o estado transacional, não a saúde do socket.
+    """
+    if conn is None:
+        return True
+
+    try:
+        return conn.closed != 0
+    except Exception:
+        # Um objeto de conexão que nem permite consultar `closed` não deve voltar
+        # para o pool.
+        return True
 
 
 def _is_transport_error(exc: psycopg2.Error, conn=None) -> bool:

@@ -1,4 +1,6 @@
+import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -14,6 +16,8 @@ load_dotenv()
 
 # ─── Config ─────────────────────────────────────────────────
 
+logger = logging.getLogger("openseries.db")
+
 DB_CONFIG = {
     "host": os.getenv("SUPABASE_DB_HOST", "localhost"),
     "port": int(os.getenv("SUPABASE_DB_PORT", 5432)),
@@ -21,8 +25,19 @@ DB_CONFIG = {
     "user": os.getenv("SUPABASE_DB_USER", "postgres"),
     "password": os.getenv("SUPABASE_DB_PASSWORD", ""),
     "sslmode": os.getenv("SUPABASE_DB_SSLMODE", "require"),
+    "connect_timeout": int(os.getenv("SUPABASE_DB_CONNECT_TIMEOUT", "10")),
+    "keepalives": 1,
+    "keepalives_idle": int(os.getenv("SUPABASE_DB_KEEPALIVES_IDLE", "30")),
+    "keepalives_interval": int(os.getenv("SUPABASE_DB_KEEPALIVES_INTERVAL", "10")),
+    "keepalives_count": int(os.getenv("SUPABASE_DB_KEEPALIVES_COUNT", "5")),
+    "application_name": os.getenv("SUPABASE_DB_APPLICATION_NAME", "openseries-api"),
 }
 
+DB_POOL_MIN = int(os.getenv("DB_POOL_MIN", "1"))
+DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "5"))
+DB_QUERY_RETRIES = max(1, int(os.getenv("DB_QUERY_RETRIES", "2")))
+REFRESH_STATS_TIMEOUT_MS = int(os.getenv("REFRESH_STATS_TIMEOUT_MS", "600000"))
+REFRESH_STATS_RETRIES = max(1, int(os.getenv("REFRESH_STATS_RETRIES", "2")))
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "change-me")
 
@@ -32,10 +47,16 @@ db_pool: pool.ThreadedConnectionPool | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db_pool
-    db_pool = pool.ThreadedConnectionPool(2, 20, **DB_CONFIG)
-    yield
-    if db_pool:
-        db_pool.closeall()
+    if DB_POOL_MIN < 1 or DB_POOL_MAX < DB_POOL_MIN:
+        raise RuntimeError("Configuração inválida de pool: DB_POOL_MIN/DB_POOL_MAX")
+
+    db_pool = pool.ThreadedConnectionPool(DB_POOL_MIN, DB_POOL_MAX, **DB_CONFIG)
+    try:
+        yield
+    finally:
+        if db_pool:
+            db_pool.closeall()
+            db_pool = None
 
 
 app = FastAPI(
@@ -58,22 +79,103 @@ app.add_middleware(
 
 # ─── Helpers ────────────────────────────────────────────────
 
+def _require_pool() -> pool.ThreadedConnectionPool:
+    if db_pool is None:
+        raise RuntimeError("Pool de conexões ainda não foi inicializado")
+    return db_pool
+
+
+def _connection_is_broken(conn) -> bool:
+    return (
+        conn is None
+        or bool(conn.closed)
+        or conn.status == psycopg2.extensions.STATUS_BAD
+    )
+
+
+def _is_transport_error(exc: psycopg2.Error, conn=None) -> bool:
+    # Erros de transporte normalmente chegam sem SQLSTATE/pgcode.
+    return (
+        isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError))
+        or getattr(exc, "pgcode", None) is None
+        or _connection_is_broken(conn)
+    )
+
+
 def get_conn():
-    return db_pool.getconn()
+    """Retira uma conexão válida do pool.
+
+    O ThreadedConnectionPool do psycopg2 não valida automaticamente sockets que
+    foram encerrados pelo servidor/pooler enquanto estavam ociosos. Por isso,
+    cada checkout testa a conexão e descarta qualquer conexão morta.
+    """
+    connection_pool = _require_pool()
+    last_error: Exception | None = None
+
+    for _ in range(2):
+        conn = connection_pool.getconn()
+        try:
+            if _connection_is_broken(conn):
+                connection_pool.putconn(conn, close=True)
+                continue
+
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            return conn
+        except psycopg2.Error as exc:
+            last_error = exc
+            connection_pool.putconn(conn, close=True)
+
+    raise psycopg2.OperationalError(
+        "Não foi possível obter uma conexão PostgreSQL válida do pool"
+    ) from last_error
 
 
-def put_conn(conn):
-    db_pool.putconn(conn)
+def put_conn(conn, *, close: bool = False):
+    if conn is None:
+        return
+
+    connection_pool = _require_pool()
+    discard = close or _connection_is_broken(conn)
+
+    if not discard and not conn.autocommit:
+        try:
+            conn.rollback()
+        except psycopg2.Error:
+            discard = True
+
+    connection_pool.putconn(conn, close=discard)
 
 
 def query(sql: str, params: tuple = ()) -> list[dict]:
-    conn = get_conn()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql, params)
-            return [dict(row) for row in cur.fetchall()]
-    finally:
-        put_conn(conn)
+    """Executa SELECT com uma nova tentativa apenas em falha de transporte."""
+    last_error: psycopg2.Error | None = None
+
+    for attempt in range(DB_QUERY_RETRIES):
+        conn = None
+        discard = False
+        try:
+            conn = get_conn()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, params)
+                return [dict(row) for row in cur.fetchall()]
+        except psycopg2.Error as exc:
+            last_error = exc
+            discard = _is_transport_error(exc, conn)
+            if not discard or attempt + 1 >= DB_QUERY_RETRIES:
+                raise
+            logger.warning(
+                "Conexão PostgreSQL interrompida; descartando socket e repetindo SELECT",
+                exc_info=True,
+            )
+            time.sleep(0.25)
+        finally:
+            if conn is not None:
+                put_conn(conn, close=discard)
+
+    raise psycopg2.OperationalError("Falha ao consultar o PostgreSQL") from last_error
 
 
 def query_one(sql: str, params: tuple = ()) -> dict | None:
@@ -1218,17 +1320,81 @@ def get_game(game_id: int):
 
 @app.post("/api/admin/refresh-stats", tags=["Admin"], dependencies=[Depends(verify_admin)])
 def refresh_stats():
-    """Atualiza as materialized views. Requer header X-Api-Key."""
-    conn = get_conn()
-    try:
-        old_autocommit = conn.autocommit
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute("SELECT refresh_all_stats()")
-        conn.autocommit = old_autocommit
-        return {"status": "ok", "message": "Views atualizadas com sucesso."}
-    finally:
-        put_conn(conn)
+    """Atualiza as materialized views em conexão dedicada.
+
+    O refresh é uma operação administrativa rara e potencialmente longa. Uma
+    conexão nova evita reutilizar um socket ocioso encerrado pelo Supabase/
+    Supavisor. A advisory lock impede dois refreshes simultâneos.
+    """
+    last_error: psycopg2.Error | None = None
+
+    for attempt in range(REFRESH_STATS_RETRIES):
+        conn = None
+        try:
+            conn = psycopg2.connect(**DB_CONFIG)
+            conn.autocommit = True
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT set_config('statement_timeout', %s, false)",
+                    (str(REFRESH_STATS_TIMEOUT_MS),),
+                )
+                cur.execute(
+                    "SELECT pg_try_advisory_lock(hashtext('openseries.refresh_all_stats'))"
+                )
+                locked = bool(cur.fetchone()[0])
+                if not locked:
+                    raise HTTPException(
+                        409,
+                        "Já existe uma atualização de estatísticas em andamento.",
+                    )
+
+                try:
+                    cur.execute("SELECT public.refresh_all_stats()")
+                finally:
+                    try:
+                        cur.execute(
+                            "SELECT pg_advisory_unlock(hashtext('openseries.refresh_all_stats'))"
+                        )
+                    except psycopg2.Error:
+                        # Se a conexão caiu, o PostgreSQL libera a lock ao encerrar a sessão.
+                        pass
+
+            return {"status": "ok", "message": "Views atualizadas com sucesso."}
+
+        except HTTPException:
+            raise
+        except psycopg2.Error as exc:
+            last_error = exc
+            transport_error = _is_transport_error(exc, conn)
+
+            if not transport_error:
+                logger.exception("O PostgreSQL recusou o refresh das materialized views")
+                raise HTTPException(
+                    500,
+                    "O PostgreSQL retornou um erro ao atualizar as estatísticas.",
+                ) from exc
+
+            if attempt + 1 >= REFRESH_STATS_RETRIES:
+                logger.exception("A conexão caiu durante o refresh das materialized views")
+                raise HTTPException(
+                    503,
+                    "A conexão com o banco foi interrompida durante a atualização das estatísticas.",
+                ) from exc
+
+            logger.warning(
+                "Conexão interrompida durante refresh; abrindo uma conexão nova e repetindo",
+                exc_info=True,
+            )
+            time.sleep(0.5)
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except psycopg2.Error:
+                    pass
+
+    raise HTTPException(503, "Não foi possível atualizar as estatísticas.") from last_error
 
 
 @app.get("/api/stages", tags=["Utilitários"])
@@ -1239,7 +1405,17 @@ def list_stages():
 
 @app.get("/api/health", tags=["Utilitários"])
 def health():
-    return {"status": "ok"}
+    """Verifica a API e uma consulta real ao PostgreSQL."""
+    try:
+        row = query_one("SELECT 1 AS ok")
+    except psycopg2.Error as exc:
+        logger.exception("Health check do PostgreSQL falhou")
+        raise HTTPException(503, "Banco de dados indisponível") from exc
+
+    return {
+        "status": "ok",
+        "database": "ok" if row and row.get("ok") == 1 else "error",
+    }
 
 
 def _is_frontend_view(view: Optional[str]) -> bool:
